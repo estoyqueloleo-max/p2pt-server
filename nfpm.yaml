@@ -1,0 +1,20 @@
+name: "p2pt-server"
+arch: "${ARCH}"
+platform: "linux"
+version: "1.0.0"
+section: "net"
+priority: "optional"
+maintainer: "Jose Juan Montiel"
+description: "P2PT Standalone Server (PeerJS + Pion TURN/STUN)"
+homepage: "https://estoyqueloleo-max.github.io/p2pt"
+license: "MIT"
+
+contents:
+  - src: ${BIN_PATH}
+    dst: /usr/bin/p2pt-server
+    file_info:
+      mode: 0755
+  - src: ./services/p2pt
+    dst: /etc/init.d/p2pt
+    file_info:
+      mode: 0755

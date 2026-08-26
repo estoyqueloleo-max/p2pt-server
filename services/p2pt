@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+
+description="P2PT Standalone Server (PeerJS + Pion TURN/STUN)"
+
+command="/usr/bin/p2pt-server"
+command_args="${P2PT_OPTS:--port 9000 -turn-port 3478 -upnp}"
+command_user="root"
+command_background="yes"
+pidfile="/run/p2pt.pid"
+output_log="/var/log/p2pt.log"
+error_log="/var/log/p2pt.err"
+
+depend() {
+    need net
+    after wpa_supplicant networking appliance-setup
+}
+
+start_pre() {
+    if [ -f /etc/p2pt.env ]; then
+        set -a
+        source /etc/p2pt.env
+        set +a
+    fi
+}
