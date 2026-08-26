@@ -1,0 +1,31 @@
+# ==============================================================================
+# Receta Declarativa de Appliance para P2PT Server
+# ==============================================================================
+
+appliance:
+  name: "p2pt-box"
+  board: "rpi-zero" # rpi-zero | rpi-3 | rpi-4 | generic-x86_64
+  hostname: "p2pt-box"
+  boot_label: "P2PT_BOOT"
+
+packages:
+  # Paquetes oficiales de los repositorios de Alpine Linux:
+  alpine:
+    - ca-certificates
+    - curl
+    - bind-tools
+
+  # Paquete APK generado localmente por build.sh / nfpm:
+  apks:
+    - "./dist/p2pt-server_1.0.0_armhf.apk"
+
+services:
+  # Servicios OpenRC a habilitar automáticamente:
+  enable:
+    - p2pt
+
+network:
+  ip: "192.168.1.50"
+  netmask: "255.255.255.0"
+  gateway: "192.168.1.1"
+  dns: "1.1.1.1 8.8.8.8"
