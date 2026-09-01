@@ -14,6 +14,10 @@ packages:
     - ca-certificates
     - curl
     - bind-tools
+    - hostapd
+    - dnsmasq
+    - iw
+    - wireless-tools
 
   # Paquete APK generado localmente por build.sh / nfpm:
   apks:
