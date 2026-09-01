@@ -919,7 +919,7 @@ func main() {
 	}
 
 	// 6. Initialize Auto-Updater if enabled
-	updater := NewUpdaterManager("estoyqueloleo-max", "p2pt")
+	updater := NewUpdaterManager("estoyqueloleo-max", "p2pt-server")
 	if cfg.EnableAutoUpdate {
 		log.Println("[Updater] Auto-actualizador activado en segundo plano (Revisión cada 12h).")
 		updater.StartBackgroundCheck()

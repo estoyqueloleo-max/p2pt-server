@@ -43,7 +43,7 @@ func NewUpdaterManager(repoOwner, repoName string) *UpdaterManager {
 		repoOwner = "estoyqueloleo-max"
 	}
 	if repoName == "" {
-		repoName = "p2pt"
+		repoName = "p2pt-server"
 	}
 	return &UpdaterManager{
 		RepoOwner:      repoOwner,
