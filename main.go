@@ -1458,6 +1458,123 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
     <script>
         let currentPairURL = "%s";
 
+        function toggleIPFields() {
+            const isStatic = document.querySelector('input[name="ip_mode"]:checked').value === 'static';
+            const container = document.getElementById('static-ip-container');
+            if (container) {
+                container.style.display = isStatic ? 'flex' : 'none';
+            }
+        }
+
+        function selectScannedSSID(ssid) {
+            if (ssid) {
+                document.getElementById('wifi-ssid-input').value = ssid;
+                const passInput = document.getElementById('wifi-pass-input');
+                if (passInput) passInput.focus();
+            }
+        }
+
+        async function scanWiFiNetworks() {
+            const btn = document.getElementById('scan-wifi-btn');
+            const status = document.getElementById('scan-status');
+            const select = document.getElementById('wifi-select');
+            if (btn) btn.disabled = true;
+            if (status) status.innerText = "⏳ Escaneando...";
+
+            try {
+                const res = await fetch('/api/wifi/scan');
+                const data = await res.json();
+                if (data.networks && data.networks.length > 0) {
+                    if (select) {
+                        select.innerHTML = '<option value="">-- ' + data.networks.length + ' redes detectadas --</option>';
+                        data.networks.forEach(n => {
+                            const opt = document.createElement('option');
+                            opt.value = n.ssid;
+                            opt.innerText = n.ssid + (n.signal ? ' (' + n.signal + ' dBm)' : '');
+                            select.appendChild(opt);
+                        });
+                        select.style.display = 'block';
+                    }
+                    if (status) status.innerText = '✅ ' + data.networks.length + ' redes';
+                } else {
+                    if (status) status.innerText = 'ℹ️ Escribe el SSID manualmente.';
+                }
+            } catch (e) {
+                if (status) status.innerText = 'ℹ️ Escribe el SSID manualmente.';
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function saveWiFiAndReboot() {
+            const ssid = document.getElementById("wifi-ssid-input").value.trim();
+            const password = document.getElementById("wifi-pass-input").value.trim();
+            const ipMode = document.querySelector('input[name="ip_mode"]:checked').value;
+            const ip = document.getElementById("wifi-ip-input").value.trim();
+            const netmask = document.getElementById("wifi-mask-input").value.trim();
+            const gateway = document.getElementById("wifi-gw-input").value.trim();
+            const dns = document.getElementById("wifi-dns-input").value.trim();
+            const btn = document.getElementById("save-wifi-btn");
+            const alertBox = document.getElementById("wifi-alert");
+
+            if (!ssid) {
+                if (alertBox) {
+                    alertBox.style.display = "block";
+                    alertBox.className = "alert alert-warning";
+                    alertBox.innerText = "⚠️ Por favor introduce el nombre de la red Wi-Fi (SSID).";
+                }
+                return;
+            }
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "⏳ Guardando en MicroSD y reiniciando...";
+            }
+            if (alertBox) {
+                alertBox.style.display = "block";
+                alertBox.className = "alert alert-info";
+                alertBox.innerHTML = "⏳ <b>Guardando configuración en la MicroSD...</b>";
+            }
+
+            try {
+                const res = await fetch("/api/wifi/configure", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        ssid: ssid,
+                        password: password,
+                        ip_mode: ipMode,
+                        ip: ip,
+                        netmask: netmask,
+                        gateway: gateway,
+                        dns: dns,
+                        reboot: true
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (alertBox) {
+                        alertBox.className = "alert alert-success";
+                        alertBox.innerHTML = "✅ <b>" + data.message + "</b><br><br>👉 La Raspberry Pi se está reiniciando.<br>Vuelve a conectar tu móvil a la Wi-Fi habitual (<b>" + ssid + "</b>) y abre <a href='http://pingo.local:9000/' style='color:var(--accent); font-weight:bold;'>http://pingo.local:9000/</a> en ~30 segundos.";
+                    }
+                } else {
+                    if (alertBox) {
+                        alertBox.className = "alert alert-warning";
+                        alertBox.innerText = "⚠️ " + data.message;
+                    }
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerText = "💾 Guardar y Reiniciar Raspberry Pi";
+                    }
+                }
+            } catch (err) {
+                if (alertBox) {
+                    alertBox.className = "alert alert-success";
+                    alertBox.innerHTML = "✅ <b>Configuración enviada. La Raspberry Pi se está reiniciando...</b><br><br>👉 Vuelve a conectar tu móvil a tu Wi-Fi habitual.";
+                }
+            }
+        }
+
         function copyPairURL() {
             navigator.clipboard.writeText(currentPairURL).then(() => {
                 alert("¡Enlace de vinculación copiado al portapapeles!");
