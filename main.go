@@ -1408,22 +1408,53 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             <div id="wifi-alert" class="alert" style="display: none; margin-top: 14px;"></div>
         </div>
 
-        <div class="card">
-            <h3>
-                <span>🦆 Asistente DuckDNS (DNS Dinámico)</span>
-                <span style="font-size:0.8rem; font-weight:normal; color:var(--text-muted);">Gratuito en <a href="https://www.duckdns.org" target="_blank" style="color:var(--accent);">duckdns.org</a></span>
-            </h3>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Subdominio DuckDNS</label>
-                    <input type="text" id="duck-domain-input" class="form-control" placeholder="ej. mi-nodo-pingo" value="%s">
+                <div class="card" style="border: 1px solid rgba(234, 179, 8, 0.4); background: rgba(234, 179, 8, 0.03);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h3 style="margin: 0;">
+                    <span>🦆 2. Dominio Global & Acceso desde Fuera de Casa (DuckDNS)</span>
+                </h3>
+                <span class="badge badge-warning" style="font-size:0.75rem;">Opcional pero Recomendado</span>
+            </div>
+            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 16px 0;">
+                DuckDNS te proporciona un dominio público gratuito (ej: <code>mi-nodo.duckdns.org</code>) para conectar a tu Raspberry Pi por <b>HTTPS/WSS</b> desde la calle o red móvil sin pagar nada ni configurar IPs dinámicas.
+            </p>
+
+            <!-- Guía Rápida por Pasos -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 16px;">
+                <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px; border-left: 3px solid #eab308; font-size: 0.84rem;">
+                    <b style="color:#fde047;">Paso 1: Entrar a DuckDNS</b>
+                    <p style="margin: 4px 0 6px 0; color: var(--text-muted); font-size: 0.78rem;">Inicia sesión gratis con Google o GitHub:</p>
+                    <a href="https://www.duckdns.org" target="_blank" class="btn btn-secondary" style="font-size: 0.75rem; padding: 4px 8px; display: inline-block;">
+                        ↗️ Abrir DuckDNS.org
+                    </a>
                 </div>
-                <div class="form-group">
-                    <label>Token Privado</label>
-                    <input type="password" id="duck-token-input" class="form-control" placeholder="xxxxxxxx-xxxx-xxxx-xxxx" value="%s">
+                <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px; border-left: 3px solid #3b82f6; font-size: 0.84rem;">
+                    <b style="color:#93c5fd;">Paso 2: Crear tu Subdominio</b>
+                    <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 0.78rem;">En la casilla <i>domains</i>, escribe un nombre (ej. <code>pingo-casa</code>) y pulsa <i>add domain</i>.</p>
                 </div>
-                <div class="form-group" style="flex:0.5; min-width:140px; justify-content:flex-end;">
-                    <button id="save-duck-btn" onclick="saveDuckDNS()" class="btn" style="width:100%%;">💾 Probar y Guardar</button>
+                <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px; border-left: 3px solid #10b981; font-size: 0.84rem;">
+                    <b style="color:#6ee7b7;">Paso 3: Copiar tu Token</b>
+                    <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 0.78rem;">Copia el <i>token</i> alfanumérico que aparece arriba en la barra de DuckDNS.</p>
+                </div>
+            </div>
+
+            <!-- Formulario de Configuración -->
+            <div class="form-row" style="align-items: flex-end;">
+                <div class="form-group" style="flex: 1.5;">
+                    <label>Tu Subdominio Elegido</label>
+                    <div style="display: flex; align-items: center; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
+                        <input type="text" id="duck-domain-input" class="form-control" placeholder="ej. pingo-casa" value="%s" style="border: none; background: transparent;" oninput="cleanDuckDomain(this)">
+                        <span style="padding: 0 10px; color: var(--text-muted); font-size: 0.85rem; background: rgba(255,255,255,0.05); height: 100%%; display: flex; align-items: center; border-left: 1px solid var(--border);">.duckdns.org</span>
+                    </div>
+                </div>
+                <div class="form-group" style="flex: 1.5;">
+                    <label>Tu Token Privado de DuckDNS</label>
+                    <input type="password" id="duck-token-input" class="form-control" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="%s">
+                </div>
+                <div class="form-group" style="flex: 1; min-width: 160px;">
+                    <button type="button" id="save-duck-btn" onclick="saveDuckDNS()" class="btn" style="width: 100%%; padding: 10px; font-weight: bold; background: #eab308; color: #000; border-radius: 6px; cursor: pointer;">
+                        🚀 Probar y Activar
+                    </button>
                 </div>
             </div>
             <div id="duck-alert" class="alert %s" style="display:%s;">%s</div>
@@ -1706,19 +1737,32 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
         }
 
+                function cleanDuckDomain(input) {
+            let val = input.value.trim().toLowerCase();
+            val = val.replace('.duckdns.org', '').replace('http://', '').replace('https://', '').replace(/\//g, '');
+            input.value = val;
+        }
+
         async function saveDuckDNS() {
-            const domain = document.getElementById("duck-domain-input").value.trim();
-            const token = document.getElementById("duck-token-input").value.trim();
+            const domainInput = document.getElementById("duck-domain-input");
+            const tokenInput = document.getElementById("duck-token-input");
+            const domain = domainInput.value.trim().toLowerCase().replace('.duckdns.org', '');
+            const token = tokenInput.value.trim();
             const btn = document.getElementById("save-duck-btn");
             const alertBox = document.getElementById("duck-alert");
 
             if (!domain || !token) {
-                alert("Por favor introduce el subdominio y el token de DuckDNS.");
+                alertBox.style.display = "block";
+                alertBox.className = "alert alert-warning";
+                alertBox.innerText = "⚠️ Por favor introduce el subdominio (ej: pingo-casa) y el token de DuckDNS.";
                 return;
             }
 
             btn.disabled = true;
-            btn.innerText = "⏳ Verificando...";
+            btn.innerText = "⏳ Verificando en DuckDNS...";
+            alertBox.style.display = "block";
+            alertBox.className = "alert alert-info";
+            alertBox.innerHTML = "⏳ <b>Contactando con los servidores de DuckDNS y actualizando tu IP pública...</b>";
 
             try {
                 const res = await fetch("/api/duckdns", {
@@ -1728,26 +1772,32 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 });
                 const data = await res.json();
 
-                alertBox.style.display = "block";
                 if (data.success) {
                     alertBox.className = "alert alert-success";
-                    alertBox.innerText = "✅ " + data.message;
+                    const fullHost = domain + ".duckdns.org";
+                    alertBox.innerHTML = "🎉 <b>¡Dominio DuckDNS activado con éxito!</b><br><br>" +
+                        "🌐 <b>Tu dominio público:</b> <code>" + fullHost + "</code><br>" +
+                        "📲 El código QR y los enlaces de vinculación se han actualizado automáticamente.<br>" +
+                        "👉 Enlace directo seguro: <a href='https://" + fullHost + ":9000/' target='_blank' style='color:#6ee7b7; font-weight:bold;'>https://" + fullHost + ":9000/</a>";
+                    
                     if (data.pair_url) {
                         currentPairURL = data.pair_url;
-                        document.getElementById("pair-btn").href = data.pair_url;
+                        const pairBtn = document.getElementById("pair-btn");
+                        if (pairBtn) pairBtn.href = data.pair_url;
                     }
-                    setTimeout(() => window.location.reload(), 1500);
+                    setTimeout(() => window.location.reload(), 3000);
                 } else {
                     alertBox.className = "alert alert-warning";
-                    alertBox.innerText = "⚠️ " + data.message;
+                    alertBox.innerText = "⚠️ Error al activar DuckDNS: " + (data.message || "Verifica que el token y subdominio sean correctos.");
+                    btn.disabled = false;
+                    btn.innerText = "🚀 Probar y Activar";
                 }
             } catch (err) {
                 alertBox.style.display = "block";
                 alertBox.className = "alert alert-warning";
-                alertBox.innerText = "Error contactando con el servidor: " + err.message;
-            } finally {
+                alertBox.innerText = "Error contactando con el servidor local: " + err.message;
                 btn.disabled = false;
-                btn.innerText = "💾 Probar y Guardar";
+                btn.innerText = "🚀 Probar y Activar";
             }
         }
     </script>
