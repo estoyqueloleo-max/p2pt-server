@@ -297,6 +297,50 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
 	return clientConfig, string(configJSONBytes), pairURL
 }
 
+type ScannedNetwork struct {
+	SSID   string `json:"ssid"`
+	Signal int    `json:"signal"`
+}
+
+func scanWiFiNetworks() []ScannedNetwork {
+	var networks []ScannedNetwork
+	seen := make(map[string]bool)
+
+	out, err := exec.Command("iw", "dev", "wlan0", "scan").Output()
+	if err != nil || len(out) == 0 {
+		out, _ = exec.Command("iwlist", "wlan0", "scan").Output()
+	}
+
+	lines := strings.Split(string(out), "\n")
+	currentSignal := -100
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "signal:") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				if sig, err := strconv.ParseFloat(parts[1], 64); err == nil {
+					currentSignal = int(sig)
+				}
+			}
+		} else if strings.HasPrefix(line, "SSID:") {
+			ssid := strings.TrimSpace(strings.TrimPrefix(line, "SSID:"))
+			if ssid != "" && !seen[ssid] {
+				seen[ssid] = true
+				networks = append(networks, ScannedNetwork{SSID: ssid, Signal: currentSignal})
+			}
+			currentSignal = -100
+		} else if strings.HasPrefix(line, "ESSID:") {
+			ssid := strings.Trim(strings.TrimPrefix(line, "ESSID:"), "\"'\r ")
+			if ssid != "" && !seen[ssid] {
+				seen[ssid] = true
+				networks = append(networks, ScannedNetwork{SSID: ssid, Signal: currentSignal})
+			}
+			currentSignal = -100
+		}
+	}
+	return networks
+}
+
 func main() {
 	serverStartTime := time.Now()
 	httpPort := flag.Int("port", 9000, "HTTP and WebSocket signaling port")
@@ -719,6 +763,19 @@ func main() {
 	})
 
 	
+	
+
+
+	mux.HandleFunc("/api/wifi/scan", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		networks := scanWiFiNetworks()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"networks": networks,
+		})
+	})
+
 	mux.HandleFunc("/api/wifi/configure", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -755,13 +812,11 @@ func main() {
 			return
 		}
 
-		// Localizar partición de arranque FAT32
 		bootDir := "/media/mmcblk0p1"
 		if _, err := os.Stat(bootDir); os.IsNotExist(err) {
 			bootDir = "/boot"
 		}
 
-		// Remontar rw por si está ro
 		_ = exec.Command("mount", "-o", "remount,rw", bootDir).Run()
 
 		wifiFile := filepath.Join(bootDir, "wifi.txt")
@@ -790,22 +845,27 @@ func main() {
 
 		_ = exec.Command("sync").Run()
 
-		if _, err := exec.LookPath("lbu"); err == nil {
-			_ = exec.Command("lbu", "commit", "-d").Run()
-		}
+		// Enviar respuesta inmediatamente antes de lbu y reboot
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Configuración guardada en la MicroSD. Reiniciando Raspberry Pi...",
+			"reboot":  payload.Reboot,
+		})
 
 		if payload.Reboot {
 			go func() {
-				time.Sleep(2 * time.Second)
-				_ = exec.Command("reboot").Run()
+				time.Sleep(500 * time.Millisecond)
+				if _, err := exec.LookPath("lbu"); err == nil {
+					_ = exec.Command("lbu", "commit", "-d").Run()
+				}
+				_ = exec.Command("sync").Run()
+				time.Sleep(500 * time.Millisecond)
+				for _, cmd := range []string{"/sbin/reboot", "/usr/sbin/reboot", "reboot"} {
+					_ = exec.Command(cmd, "-f").Start()
+					_ = exec.Command(cmd).Start()
+				}
 			}()
 		}
-
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Configuración Wi-Fi guardada. La Raspberry Pi se reiniciará para conectarse a tu router.",
-			"reboot":  payload.Reboot,
-		})
 	})
 
 	// Dashboard & Fallback
@@ -1256,55 +1316,70 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
         </div>
 
         
-        <div class="card" style="border: 1px solid rgba(59, 130, 246, 0.4);">
+                <div class="card" style="border: 2px solid var(--accent); background: rgba(59, 130, 246, 0.05);">
             <h3>
                 <span>📶 Conectar a mi Router Wi-Fi & Salida a Internet</span>
                 <span class="badge badge-warning" style="font-size:0.75rem;">Aprovisionamiento Wi-Fi</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 14px 0;">
-                Configura la red Wi-Fi doméstica para que la Raspberry Pi se conecte a Internet, salga del modo Hotspot y se registre con mDNS y DuckDNS.
+                Selecciona o escribe la red Wi-Fi de tu casa (2.4 GHz) para que la Raspberry Pi se conecte a Internet y salga del modo Hotspot.
             </p>
+
+            <div style="margin-bottom: 12px; display: flex; gap: 10px; align-items: center;">
+                <button type="button" id="scan-wifi-btn" onclick="scanWiFiNetworks()" class="btn" style="background: rgba(255,255,255,0.08); font-size: 0.82rem; padding: 6px 12px;">
+                    🔄 Escanear Redes Cercanas
+                </button>
+                <select id="wifi-select" class="form-control" style="flex: 1; display: none; font-size: 0.85rem;" onchange="selectScannedSSID(this.value)">
+                    <option value="">-- Selecciona una red escaneada --</option>
+                </select>
+                <span id="scan-status" style="font-size: 0.8rem; color: var(--text-muted);"></span>
+            </div>
+
             <div class="form-row">
                 <div class="form-group" style="flex: 1.5;">
                     <label>Nombre de la red Wi-Fi (SSID)</label>
-                    <input type="text" id="wifi-ssid-input" class="form-control" placeholder="MiFibra_2.4G (Banda 2.4GHz)" value="%s">
+                    <input type="text" id="wifi-ssid-input" class="form-control" placeholder="ej. MiFibra_2.4G" value="%s">
                 </div>
                 <div class="form-group" style="flex: 1.5;">
                     <label>Contraseña Wi-Fi</label>
-                    <input type="password" id="wifi-pass-input" class="form-control" placeholder="Contraseña de la red">
+                    <input type="password" id="wifi-pass-input" class="form-control" placeholder="Contraseña de tu router">
                 </div>
             </div>
             
-            <div style="margin-top: 10px; display: flex; align-items: center; gap: 20px;">
+            <div style="margin-top: 14px; display: flex; align-items: center; gap: 20px;">
                 <label style="font-size: 0.88rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer;">
                     <input type="radio" name="ip_mode" value="dhcp" checked onchange="toggleIPFields()"> 🟢 DHCP Automático (Recomendado)
                 </label>
                 <label style="font-size: 0.88rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                    <input type="radio" name="ip_mode" value="static" onchange="toggleIPFields()"> ⚙️ IP Estática Manual
+                    <input type="radio" name="ip_mode" value="static" onchange="toggleIPFields()"> ⚙️ IP Estática Fija
                 </label>
             </div>
 
-            <div id="static-ip-container" class="form-row" style="display: none; margin-top: 12px;">
+            <div id="static-ip-container" class="form-row" style="display: none; margin-top: 12px; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
                 <div class="form-group">
                     <label>IP Fija Deseada</label>
-                    <input type="text" id="wifi-ip-input" class="form-control" placeholder="192.168.1.50">
+                    <input type="text" id="wifi-ip-input" class="form-control" placeholder="192.168.1.50" value="192.168.1.50">
                 </div>
                 <div class="form-group">
-                    <label>Gateway (Router)</label>
-                    <input type="text" id="wifi-gw-input" class="form-control" placeholder="192.168.1.1">
+                    <label>Puerta de Enlace (Router)</label>
+                    <input type="text" id="wifi-gw-input" class="form-control" placeholder="192.168.1.1" value="192.168.1.1">
+                </div>
+                <div class="form-group">
+                    <label>Máscara de Red</label>
+                    <input type="text" id="wifi-mask-input" class="form-control" placeholder="255.255.255.0" value="255.255.255.0">
                 </div>
                 <div class="form-group">
                     <label>Servidores DNS</label>
-                    <input type="text" id="wifi-dns-input" class="form-control" placeholder="1.1.1.1 8.8.8.8">
+                    <input type="text" id="wifi-dns-input" class="form-control" placeholder="1.1.1.1 8.8.8.8" value="1.1.1.1 8.8.8.8">
                 </div>
             </div>
 
             <div style="margin-top: 16px;">
-                <button id="save-wifi-btn" onclick="saveWiFiAndReboot()" class="btn" style="width: 100%%; padding: 12px; font-weight: bold; background: var(--accent); color: white;">
+                <button type="button" id="save-wifi-btn" onclick="saveWiFiAndReboot()" class="btn" style="width: 100%%; padding: 12px; font-weight: bold; background: #3b82f6; color: white; border-radius: 6px; cursor: pointer;">
                     💾 Guardar y Reiniciar Raspberry Pi
                 </button>
             </div>
-            <div id="wifi-alert" class="alert" style="display: none; margin-top: 12px;"></div>
+            <div id="wifi-alert" class="alert" style="display: none; margin-top: 14px;"></div>
         </div>
 
         <div class="card">
