@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/tls"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
@@ -923,21 +924,29 @@ func main() {
 	_, configJSON, pairURL := generatePairConfig(cfg)
 	printBanner(cfg, pairURL, configJSON, upnpMgr.GetReport(), duckMgr.GetStatus())
 
+	cert, errTLS := EnsureTLSCertificates(cfg)
+	if errTLS == nil {
+		cfg.EnableTLS = true
+	} else {
+		log.Printf("[TLS] Advertencia: no se pudo iniciar TLS automático: %v", errTLS)
+	}
+
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort),
 		Handler: mux,
 	}
 
 	go func() {
-		proto := "HTTP"
 		if cfg.EnableTLS {
-			proto = "HTTPS"
-			log.Printf("[Signaling] Iniciando servidor %s/WSS en 0.0.0.0:%d...", proto, cfg.HTTPPort)
-			if err := httpServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+			httpServer.TLSConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			}
+			log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en 0.0.0.0:%d...", cfg.HTTPPort)
+			if err := httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("[Signaling] Error HTTPS: %v", err)
 			}
 		} else {
-			log.Printf("[Signaling] Iniciando servidor %s/WS en 0.0.0.0:%d...", proto, cfg.HTTPPort)
+			log.Printf("[Signaling] 🌐 Servidor HTTP / WS activo en 0.0.0.0:%d...", cfg.HTTPPort)
 			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("[Signaling] Error HTTP: %v", err)
 			}
@@ -1289,7 +1298,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             </div>
             <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center;">
                 <a id="pair-btn" href="%s" target="_blank" class="btn">🚀 Abrir Pingo con este Servidor</a>
-                <button onclick="copyPairURL()" class="btn btn-secondary">📋 Copiar Enlace</button>
+                <button id="copy-btn" onclick="copyPairURL()" class="btn btn-secondary">📋 Copiar Enlace</button>
             </div>
         </div>
 
@@ -1316,33 +1325,50 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
         </div>
 
         
-                <div class="card" style="border: 2px solid var(--accent); background: rgba(59, 130, 246, 0.05);">
+                <!-- Asistente de Puesta en Marcha (Wizard) -->
+        <div class="card" style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%%, rgba(15, 23, 42, 0.85) 100%%); border: 1px solid rgba(99, 102, 241, 0.3);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                <h3 style="margin: 0; color: #818cf8;">🚀 Asistente de Configuración Rápida</h3>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">Nodo Autónomo P2P</span>
+            </div>
+            <div style="display: flex; gap: 8px; font-size: 0.82rem; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #3b82f6;">
+                    <b>1. Wi-Fi & Red</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Conexión a tu router</span>
+                </div>
+                <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #8b5cf6;">
+                    <b>2. TLS & nip.io</b><br><span style="color:var(--text-muted); font-size:0.75rem;">WSS Seguro nativo</span>
+                </div>
+                <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #10b981;">
+                    <b>3. Vincular App</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Escanear QR o enlace</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" style="border: 2px solid var(--accent); background: rgba(59, 130, 246, 0.05);">
             <h3>
-                <span>📶 Conectar a mi Router Wi-Fi & Salida a Internet</span>
+                <span>📶 1. Conectar a mi Router Wi-Fi & Salida a Internet</span>
                 <span class="badge badge-warning" style="font-size:0.75rem;">Aprovisionamiento Wi-Fi</span>
             </h3>
             <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 14px 0;">
-                Selecciona o escribe la red Wi-Fi de tu casa (2.4 GHz) para que la Raspberry Pi se conecte a Internet y salga del modo Hotspot.
+                Elige la red Wi-Fi de tu casa (2.4 GHz) del desplegable para que la Raspberry Pi se conecte a Internet, salga del modo Hotspot y se registre con WSS/HTTPS.
             </p>
-
-            <div style="margin-bottom: 12px; display: flex; gap: 10px; align-items: center;">
-                <button type="button" id="scan-wifi-btn" onclick="scanWiFiNetworks()" class="btn" style="background: rgba(255,255,255,0.08); font-size: 0.82rem; padding: 6px 12px;">
-                    🔄 Escanear Redes Cercanas
-                </button>
-                <select id="wifi-select" class="form-control" style="flex: 1; display: none; font-size: 0.85rem;" onchange="selectScannedSSID(this.value)">
-                    <option value="">-- Selecciona una red escaneada --</option>
-                </select>
-                <span id="scan-status" style="font-size: 0.8rem; color: var(--text-muted);"></span>
-            </div>
 
             <div class="form-row">
                 <div class="form-group" style="flex: 1.5;">
-                    <label>Nombre de la red Wi-Fi (SSID)</label>
-                    <input type="text" id="wifi-ssid-input" class="form-control" placeholder="ej. MiFibra_2.4G" value="%s">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                        <label style="margin:0;">Red Wi-Fi Detectada</label>
+                        <button type="button" id="scan-wifi-btn" onclick="scanWiFiNetworks()" class="btn" style="background: rgba(255,255,255,0.08); font-size: 0.75rem; padding: 2px 8px;">
+                            🔄 Actualizar Redes
+                        </button>
+                    </div>
+                    <select id="wifi-select" class="form-control" onchange="handleWiFiSelectChange(this.value)">
+                        <option value="">⏳ Escaneando redes cercanas...</option>
+                    </select>
+                    <input type="text" id="wifi-ssid-input" class="form-control" placeholder="Escribe el nombre de red (SSID)" value="%s" style="display:none; margin-top:6px;">
                 </div>
                 <div class="form-group" style="flex: 1.5;">
                     <label>Contraseña Wi-Fi</label>
-                    <input type="password" id="wifi-pass-input" class="form-control" placeholder="Contraseña de tu router">
+                    <input type="password" id="wifi-pass-input" class="form-control" placeholder="Contraseña de tu red">
                 </div>
             </div>
             
@@ -1466,45 +1492,71 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
         }
 
-        function selectScannedSSID(ssid) {
-            if (ssid) {
-                document.getElementById('wifi-ssid-input').value = ssid;
-                const passInput = document.getElementById('wifi-pass-input');
+        function handleWiFiSelectChange(val) {
+            const manualInput = document.getElementById('wifi-ssid-input');
+            const passInput = document.getElementById('wifi-pass-input');
+            if (val === '__MANUAL__') {
+                manualInput.style.display = 'block';
+                manualInput.value = '';
+                manualInput.focus();
+            } else if (val) {
+                manualInput.style.display = 'none';
+                manualInput.value = val;
                 if (passInput) passInput.focus();
             }
         }
 
         async function scanWiFiNetworks() {
             const btn = document.getElementById('scan-wifi-btn');
-            const status = document.getElementById('scan-status');
             const select = document.getElementById('wifi-select');
-            if (btn) btn.disabled = true;
-            if (status) status.innerText = "⏳ Escaneando...";
+            const manualInput = document.getElementById('wifi-ssid-input');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "⏳ Buscando...";
+            }
 
             try {
                 const res = await fetch('/api/wifi/scan');
                 const data = await res.json();
                 if (data.networks && data.networks.length > 0) {
-                    if (select) {
-                        select.innerHTML = '<option value="">-- ' + data.networks.length + ' redes detectadas --</option>';
-                        data.networks.forEach(n => {
-                            const opt = document.createElement('option');
-                            opt.value = n.ssid;
-                            opt.innerText = n.ssid + (n.signal ? ' (' + n.signal + ' dBm)' : '');
-                            select.appendChild(opt);
-                        });
-                        select.style.display = 'block';
+                    const currentVal = manualInput ? manualInput.value : '';
+                    select.innerHTML = '<option value="">-- Selecciona tu red Wi-Fi (' + data.networks.length + ' disponibles) --</option>';
+                    let matched = false;
+                    data.networks.forEach(n => {
+                        const opt = document.createElement('option');
+                        opt.value = n.ssid;
+                        opt.innerText = '📶 ' + n.ssid + (n.signal ? ' (' + n.signal + ' dBm)' : '');
+                        if (currentVal && n.ssid === currentVal) {
+                            opt.selected = true;
+                            matched = true;
+                        }
+                        select.appendChild(opt);
+                    });
+                    const manualOpt = document.createElement('option');
+                    manualOpt.value = '__MANUAL__';
+                    manualOpt.innerText = '✏️ Escribir otra red (SSID manual u oculta)...';
+                    select.appendChild(manualOpt);
+                    if (matched) {
+                        manualInput.style.display = 'none';
                     }
-                    if (status) status.innerText = '✅ ' + data.networks.length + ' redes';
                 } else {
-                    if (status) status.innerText = 'ℹ️ Escribe el SSID manualmente.';
+                    select.innerHTML = '<option value="__MANUAL__">✏️ Escribir red manualmente (Sin escaneo rápido)</option>';
+                    if (manualInput) manualInput.style.display = 'block';
                 }
             } catch (e) {
-                if (status) status.innerText = 'ℹ️ Escribe el SSID manualmente.';
+                select.innerHTML = '<option value="__MANUAL__">✏️ Escribir red manualmente</option>';
+                if (manualInput) manualInput.style.display = 'block';
             } finally {
-                if (btn) btn.disabled = false;
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = "🔄 Actualizar Redes";
+                }
             }
         }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            scanWiFiNetworks();
+        });
 
         async function saveWiFiAndReboot() {
             const ssid = document.getElementById("wifi-ssid-input").value.trim();
@@ -1576,9 +1628,43 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
         }
 
         function copyPairURL() {
-            navigator.clipboard.writeText(currentPairURL).then(() => {
-                alert("¡Enlace de vinculación copiado al portapapeles!");
-            });
+            const btn = document.getElementById("copy-btn");
+            const originalText = btn ? btn.innerHTML : "📋 Copiar Enlace";
+            
+            function showSuccess() {
+                if (btn) {
+                    btn.innerHTML = "✅ ¡Enlace Copiado!";
+                    btn.style.background = "#10b981";
+                    setTimeout(() => {
+                        btn.innerHTML = originalText;
+                        btn.style.background = "";
+                    }, 2500);
+                }
+            }
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(currentPairURL).then(showSuccess).catch(() => {
+                    fallbackCopy(currentPairURL);
+                });
+            } else {
+                fallbackCopy(currentPairURL);
+            }
+
+            function fallbackCopy(text) {
+                try {
+                    const ta = document.createElement("textarea");
+                    ta.value = text;
+                    ta.style.position = "fixed";
+                    ta.style.opacity = "0";
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand("copy");
+                    document.body.removeChild(ta);
+                    showSuccess();
+                } catch(e) {
+                    prompt("Copia este enlace manualmente:", text);
+                }
+            }
         }
 
         async function saveTopicID() {
