@@ -432,6 +432,7 @@ func main() {
 		RunCLIWizard(cfg)
 	}
 
+	go SyncSystemClock()
 	localIP := getLocalOutboundIP()
 	detectedPublicIP := fetchPublicIP()
 

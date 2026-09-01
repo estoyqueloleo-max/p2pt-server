@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -79,6 +80,10 @@ func (d *DuckDNSManager) Update(ctx context.Context, customIP string) (bool, str
 		return false, "Dominio o Token de DuckDNS no configurados", fmt.Errorf("missing credentials")
 	}
 
+	if time.Now().Year() < 2026 {
+		SyncSystemClock()
+	}
+
 	url := fmt.Sprintf("https://www.duckdns.org/update?domains=%s&token=%s&ip=%s", domain, token, customIP)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -88,6 +93,22 @@ func (d *DuckDNSManager) Update(ctx context.Context, customIP string) (bool, str
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
+	if err != nil {
+		if strings.Contains(err.Error(), "x509") || strings.Contains(err.Error(), "certificate") {
+			log.Println("[DuckDNS] Detectado posible desfase de reloj en certificado TLS. Sincronizando fecha...")
+			SyncSystemClock()
+
+			insecureClient := &http.Client{
+				Timeout: 10 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				},
+			}
+			req2, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+			resp, err = insecureClient.Do(req2)
+		}
+	}
+
 	if err != nil {
 		msg := fmt.Sprintf("Error de conexión con DuckDNS: %v", err)
 		d.setStatus(false, msg, "")
@@ -136,7 +157,6 @@ func (d *DuckDNSManager) setStatus(success bool, msg, ip string) {
 	}
 }
 
-// StartBackgroundSync starts the periodic update loop
 func (d *DuckDNSManager) StartBackgroundSync() {
 	d.mu.RLock()
 	enabled := d.domain != "" && d.token != ""
@@ -147,7 +167,6 @@ func (d *DuckDNSManager) StartBackgroundSync() {
 	}
 
 	go func() {
-		// Run first update immediately
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, _, _ = d.Update(ctx, "")
 		cancel()
@@ -172,7 +191,6 @@ func (d *DuckDNSManager) Stop() {
 	close(d.stopChan)
 }
 
-// SetCredentials updates the domain/token and triggers an immediate sync
 func (d *DuckDNSManager) SetCredentials(domain, token string) (bool, string, error) {
 	d.mu.Lock()
 	d.domain = cleanDuckDomain(domain)
