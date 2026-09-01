@@ -52,8 +52,19 @@ func RunCLIWizard(cfg *Config) {
 		}
 	}
 
-	// 2. HTTP Port
-	fmt.Printf("\n🔹 Paso 3: Puerto HTTP y WebSocket [%d]: ", cfg.HTTPPort)
+	// 2. Red Comunitaria / Topic P2P
+	fmt.Printf("\n🔹 Paso 3: Red Comunitaria / Topic P2P (ej. 'amigos-valencia', o ENTER para '%s'): ", cfg.TopicID)
+	topicInput, _ := reader.ReadString('\n')
+	topicInput = strings.TrimSpace(topicInput)
+	if topicInput != "" {
+		cfg.TopicID = topicInput
+		fmt.Printf("✅ Red comunitaria configurada como: '%s' (InfoHash: %s)\n", cfg.TopicID, DeriveInfoHash(cfg.TopicID))
+	} else {
+		fmt.Printf("ℹ️ Usando red por defecto: '%s'\n", cfg.TopicID)
+	}
+
+	// 3. HTTP Port
+	fmt.Printf("\n🔹 Paso 4: Puerto HTTP y WebSocket [%d]: ", cfg.HTTPPort)
 	portInput, _ := reader.ReadString('\n')
 	portInput = strings.TrimSpace(portInput)
 	if portInput != "" {

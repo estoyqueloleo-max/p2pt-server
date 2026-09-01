@@ -13,6 +13,8 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os/exec"
+	"path/filepath"
 	"os"
 	"os/signal"
 	"strconv"
@@ -22,6 +24,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/logging"
 	"github.com/pion/turn/v4"
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -33,8 +36,11 @@ type Config struct {
 	PublicIP       string
 	DuckDomain     string
 	DuckToken      string
-	EnableUPnP     bool
-	Realm          string
+	EnableUPnP       bool
+	EnableMDNS       bool
+	EnableAutoUpdate bool
+	TopicID          string
+	Realm            string
 	Username       string
 	Password       string
 	AuthSecret     string
@@ -292,6 +298,7 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
 }
 
 func main() {
+	serverStartTime := time.Now()
 	httpPort := flag.Int("port", 9000, "HTTP and WebSocket signaling port")
 	turnPort := flag.Int("turn-port", 3478, "STUN/TURN UDP listening port")
 	publicIPFlag := flag.String("public-ip", "", "Public IP or domain of this server")
@@ -310,6 +317,10 @@ func main() {
 	tlsCert := flag.String("tls-cert", "cert.pem", "TLS Certificate file")
 	tlsKey := flag.String("tls-key", "key.pem", "TLS Private Key file")
 	appURL := flag.String("app-url", "https://pingo.accreativos.com", "Base URL of Pingo app")
+	topicFlag := flag.String("topic", "pingo-public-mesh", "P2P Community Topic / Swarm Network")
+	enableMDNS := flag.Bool("mdns", true, "Enable local mDNS / Zeroconf advertising")
+	noMDNS := flag.Bool("no-mdns", false, "Disable local mDNS advertising")
+	enableAutoUpdate := flag.Bool("auto-update", false, "Enable background auto-updates from GitHub Releases")
 
 	flag.Parse()
 
@@ -333,30 +344,42 @@ func main() {
 	if envDuckTok := os.Getenv("DUCKDNS_TOKEN"); envDuckTok != "" {
 		*duckToken = envDuckTok
 	}
+	if envTopic := os.Getenv("TOPIC_ID"); envTopic != "" {
+		*topicFlag = envTopic
+	}
 	if envUPnP := os.Getenv("ENABLE_UPNP"); envUPnP == "false" || envUPnP == "0" {
 		*enableUPnP = false
 	}
 	if *noUPnP {
 		*enableUPnP = false
 	}
+	if *noMDNS || os.Getenv("ENABLE_MDNS") == "false" || os.Getenv("ENABLE_MDNS") == "0" {
+		*enableMDNS = false
+	}
+	if os.Getenv("AUTO_UPDATE") == "true" || os.Getenv("AUTO_UPDATE") == "1" {
+		*enableAutoUpdate = true
+	}
 
 	cfg := &Config{
-		HTTPPort:     *httpPort,
-		TURNPort:     *turnPort,
-		PublicIP:     *publicIPFlag,
-		DuckDomain:   *duckDomain,
-		DuckToken:    *duckToken,
-		EnableUPnP:   *enableUPnP,
-		Realm:        *realm,
-		Username:     *username,
-		Password:     *password,
-		AuthSecret:   *authSecret,
-		MinRelayPort: *minPort,
-		MaxRelayPort: *maxPort,
-		EnableTLS:    *enableTLS,
-		TLSCertFile:  *tlsCert,
-		TLSKeyFile:   *tlsKey,
-		AppPublicURL: *appURL,
+		HTTPPort:         *httpPort,
+		TURNPort:         *turnPort,
+		PublicIP:         *publicIPFlag,
+		DuckDomain:       *duckDomain,
+		DuckToken:        *duckToken,
+		EnableUPnP:       *enableUPnP,
+		EnableMDNS:       *enableMDNS,
+		EnableAutoUpdate: *enableAutoUpdate,
+		TopicID:          *topicFlag,
+		Realm:            *realm,
+		Username:         *username,
+		Password:         *password,
+		AuthSecret:       *authSecret,
+		MinRelayPort:     *minPort,
+		MaxRelayPort:     *maxPort,
+		EnableTLS:        *enableTLS,
+		TLSCertFile:      *tlsCert,
+		TLSKeyFile:       *tlsKey,
+		AppPublicURL:     *appURL,
 	}
 
 	// Interactive Wizard if requested
@@ -402,10 +425,16 @@ func main() {
 	}
 
 	// 1. Initialize Pion TURN / STUN Server
-	turnIP := net.ParseIP(detectedPublicIP)
+	turnIP := net.ParseIP(cfg.PublicIP)
+	if turnIP == nil {
+		turnIP = net.ParseIP(detectedPublicIP)
+	}
 	if turnIP == nil {
 		turnIP = net.ParseIP("127.0.0.1")
 	}
+
+	// 1. Initialize Turn Monitor & Pion TURN Server
+	turnMonitor := NewTurnMonitor()
 
 	turnUDPListener, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", cfg.TURNPort))
 	if err != nil {
@@ -414,9 +443,17 @@ func main() {
 	defer turnUDPListener.Close()
 
 	turnServer, err := turn.NewServer(turn.ServerConfig{
-		Realm: cfg.Realm,
+		Realm:         cfg.Realm,
+		LoggerFactory: logging.NewDefaultLoggerFactory(),
 		AuthHandler: func(u string, r string, srcAddr net.Addr) ([]byte, bool) {
+			log.Printf("[TURN-Auth] Auth request for user: %s, realm: %s from %s", u, r, srcAddr)
+			if turnMonitor.CheckIPBlocked(srcAddr) {
+				log.Printf("[TURN-Auth] IP %s bloqueada temporalmente por intentos fallidos", srcAddr)
+				return nil, false
+			}
+
 			if u == cfg.Username {
+				turnMonitor.RecordAuthAttempt(u, srcAddr, true)
 				return turn.GenerateAuthKey(u, r, cfg.Password), true
 			}
 			if cfg.AuthSecret != "" {
@@ -425,10 +462,14 @@ func main() {
 					mac := hmac.New(sha1.New, []byte(cfg.AuthSecret))
 					mac.Write([]byte(u))
 					expectedPassword := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+					turnMonitor.RecordAuthAttempt(u, srcAddr, true)
 					return turn.GenerateAuthKey(u, r, expectedPassword), true
 				}
+				turnMonitor.RecordAuthAttempt(u, srcAddr, true)
 				return turn.GenerateAuthKey(u, r, cfg.AuthSecret), true
 			}
+			turnMonitor.RecordAuthAttempt(u, srcAddr, false)
+			log.Printf("[TURN-Auth] Auth failed for user: %s", u)
 			return nil, false
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{
@@ -449,9 +490,14 @@ func main() {
 	defer turnServer.Close()
 	log.Printf("[TURN] Relay UDP listo en 0.0.0.0:%d (Externo: %s:%d)", cfg.TURNPort, cfg.PublicIP, cfg.TURNPort)
 
-	// 2. Initialize PeerJS Signaling Server
+	// 2. Initialize PeerJS Signaling Server & WebTorrent Tracker
 	sigServer := NewSignalingServer(cfg)
+	tracker := NewWebTorrentTracker()
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/tracker", tracker.HandleWebSocket)
+	mux.HandleFunc("/announce", tracker.HandleWebSocket)
+	log.Printf("[Tracker] Endpoint WebTorrent WebSocket listo en ws://0.0.0.0:%d/tracker", cfg.HTTPPort)
 
 	handleWS := func(w http.ResponseWriter, r *http.Request) {
 		sigServer.HandleWebSocket(w, r)
@@ -563,9 +609,203 @@ func main() {
 		_ = json.NewEncoder(w).Encode(clientConfig)
 	})
 
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		upnpReport := upnpMgr.GetReport()
+		duckStatus := duckMgr.GetStatus()
+		status := map[string]interface{}{
+			"status":          "ok",
+			"version":         CurrentVersion,
+			"uptime_seconds":  int(time.Since(serverStartTime).Seconds()),
+			"public_host":     cfg.GetPublicIP(),
+			"http_port":       cfg.HTTPPort,
+			"turn_port":       cfg.TURNPort,
+			"topic_id":        cfg.TopicID,
+			"info_hash":       DeriveInfoHash(cfg.TopicID),
+			"upnp":            upnpReport,
+			"duckdns":         duckStatus,
+			"mdns":            cfg.EnableMDNS,
+			"auto_update":     cfg.EnableAutoUpdate,
+			"active_clients":  sigServer.ClientCount(),
+			"tracker_swarms":  tracker.SwarmCount(),
+		}
+		_ = json.NewEncoder(w).Encode(status)
+	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		fmt.Fprintf(w, `{"status":"ok","clients":%d,"turn":"active"}`+"\n", sigServer.ClientCount())
+	})
+
+	mux.HandleFunc("/turn-credentials", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		ttl := 86400
+		expiry := time.Now().Unix() + int64(ttl)
+		user := r.URL.Query().Get("user")
+		if user == "" {
+			user = "pingo-client"
+		}
+		turnUser := fmt.Sprintf("%d:%s", expiry, user)
+		mac := hmac.New(sha1.New, []byte(cfg.AuthSecret))
+		mac.Write([]byte(turnUser))
+		turnPass := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+		turnURI := fmt.Sprintf("turn:%s:%d?transport=udp", cfg.GetPublicIP(), cfg.TURNPort)
+		stunURI := fmt.Sprintf("stun:%s:%d", cfg.GetPublicIP(), cfg.TURNPort)
+
+		resp := map[string]interface{}{
+			"iceServers": []map[string]interface{}{
+				{
+					"urls":       []string{turnURI, stunURI},
+					"username":   turnUser,
+					"credential": turnPass,
+				},
+			},
+			"ttl": ttl,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	mux.HandleFunc("/api/turn", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/turn-credentials", http.StatusTemporaryRedirect)
+	})
+
+	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != "POST" {
+			http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		var payload struct {
+			DuckDomain string `json:"duck_domain"`
+			DuckToken  string `json:"duck_token"`
+			TopicID    string `json:"topic_id"`
+			UPnP       *bool  `json:"upnp"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+			return
+		}
+		if payload.DuckDomain != "" {
+			cfg.DuckDomain = strings.TrimSpace(payload.DuckDomain)
+			cfg.SetPublicIP(formatFullDomain(cfg.DuckDomain))
+		}
+		if payload.DuckToken != "" {
+			cfg.DuckToken = strings.TrimSpace(payload.DuckToken)
+		}
+		if payload.TopicID != "" {
+			cfg.TopicID = strings.TrimSpace(payload.TopicID)
+		}
+		if payload.UPnP != nil {
+			cfg.EnableUPnP = *payload.UPnP
+		}
+		_ = SaveConfigToEnv(cfg)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"config":  cfg,
+		})
+	})
+	mux.HandleFunc("/api/turn/sessions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		sessions, activeCount, blockedCount := turnMonitor.GetActiveSessions()
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"active_sessions_count": activeCount,
+			"blocked_ips_count":     blockedCount,
+			"sessions":              sessions,
+		})
+	})
+
+	
+	mux.HandleFunc("/api/wifi/configure", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.Method != "POST" {
+			http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload struct {
+			SSID     string `json:"ssid"`
+			Password string `json:"password"`
+			IPMode   string `json:"ip_mode"`
+			IP       string `json:"ip"`
+			Netmask  string `json:"netmask"`
+			Gateway  string `json:"gateway"`
+			DNS      string `json:"dns"`
+			Reboot   bool   `json:"reboot"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+		ssid := strings.TrimSpace(payload.SSID)
+		pass := strings.TrimSpace(payload.Password)
+		if ssid == "" {
+			http.Error(w, `{"error":"SSID cannot be empty"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Localizar partición de arranque FAT32
+		bootDir := "/media/mmcblk0p1"
+		if _, err := os.Stat(bootDir); os.IsNotExist(err) {
+			bootDir = "/boot"
+		}
+
+		// Remontar rw por si está ro
+		_ = exec.Command("mount", "-o", "remount,rw", bootDir).Run()
+
+		wifiFile := filepath.Join(bootDir, "wifi.txt")
+		wifiContent := fmt.Sprintf("SSID=%s\nPASS=%s\n", ssid, pass)
+		_ = os.WriteFile(wifiFile, []byte(wifiContent), 0644)
+
+		ipFile := filepath.Join(bootDir, "ip.txt")
+		if payload.IPMode == "static" && payload.IP != "" {
+			netmask := payload.Netmask
+			if netmask == "" {
+				netmask = "255.255.255.0"
+			}
+			gateway := payload.Gateway
+			if gateway == "" {
+				gateway = "192.168.1.1"
+			}
+			dns := payload.DNS
+			if dns == "" {
+				dns = "1.1.1.1 8.8.8.8"
+			}
+			ipContent := fmt.Sprintf("IP=%s\nNETMASK=%s\nGATEWAY=%s\nDNS=%s\n", payload.IP, netmask, gateway, dns)
+			_ = os.WriteFile(ipFile, []byte(ipContent), 0644)
+		} else {
+			_ = os.Remove(ipFile)
+		}
+
+		_ = exec.Command("sync").Run()
+
+		if _, err := exec.LookPath("lbu"); err == nil {
+			_ = exec.Command("lbu", "commit", "-d").Run()
+		}
+
+		if payload.Reboot {
+			go func() {
+				time.Sleep(2 * time.Second)
+				_ = exec.Command("reboot").Run()
+			}()
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Configuración Wi-Fi guardada. La Raspberry Pi se reiniciará para conectarse a tu router.",
+			"reboot":  payload.Reboot,
+		})
 	})
 
 	// Dashboard & Fallback
@@ -591,12 +831,34 @@ func main() {
 		}
 
 		if path == "" || path == "/" {
-			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr)
+			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, tracker, turnMonitor)
 			return
 		}
 
 		http.NotFound(w, r)
 	})
+
+	// 3. Initialize Swarm Announcer (P2P Topic Federation)
+	swarmAnnouncer := NewSwarmAnnouncer(cfg)
+	swarmAnnouncer.Start()
+
+	// 5. Initialize mDNS Local Discovery
+	var mdnsServer *MDNSServer
+	if cfg.EnableMDNS {
+		mdns, err := StartMDNSServer(cfg.HTTPPort, cfg.TURNPort, "Pingo Server", "pingo")
+		if err != nil {
+			log.Printf("[mDNS] Advertencia: no se pudo iniciar mDNS: %v", err)
+		} else {
+			mdnsServer = mdns
+		}
+	}
+
+	// 6. Initialize Auto-Updater if enabled
+	updater := NewUpdaterManager("estoyqueloleo-max", "p2pt")
+	if cfg.EnableAutoUpdate {
+		log.Println("[Updater] Auto-actualizador activado en segundo plano (Revisión cada 12h).")
+		updater.StartBackgroundCheck()
+	}
 
 	_, configJSON, pairURL := generatePairConfig(cfg)
 	printBanner(cfg, pairURL, configJSON, upnpMgr.GetReport(), duckMgr.GetStatus())
@@ -627,6 +889,15 @@ func main() {
 	<-sigChan
 
 	log.Println("\n[Server] Apagando el servidor con seguridad...")
+	if swarmAnnouncer != nil {
+		swarmAnnouncer.Stop()
+	}
+	if mdnsServer != nil {
+		mdnsServer.Close()
+	}
+	if cfg.EnableAutoUpdate {
+		updater.Stop()
+	}
 	duckMgr.Stop()
 	_ = httpServer.Close()
 	_ = turnServer.Close()
@@ -638,7 +909,9 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 	fmt.Println("  🌐 PINGO STANDALONE SERVER (PeerJS Signaling + Pion TURN/STUN)   ")
 	fmt.Println("==================================================================")
 	fmt.Printf(" • Host Público       : %s\n", cfg.GetPublicIP())
+	fmt.Printf(" • Red P2P / Topic    : %s (InfoHash: %s)\n", cfg.TopicID, DeriveInfoHash(cfg.TopicID))
 	fmt.Printf(" • Señalización (WS)  : http%s://%s:%d\n", map[bool]string{true: "s", false: ""}[cfg.EnableTLS], cfg.GetPublicIP(), cfg.HTTPPort)
+	fmt.Printf(" • WebTorrent Tracker : ws%s://%s:%d/tracker\n", map[bool]string{true: "s", false: ""}[cfg.EnableTLS], cfg.GetPublicIP(), cfg.HTTPPort)
 	fmt.Printf(" • Servidor TURN/STUN : turn:%s:%d (UDP)\n", cfg.GetPublicIP(), cfg.TURNPort)
 	fmt.Printf(" • Credenciales TURN  : user='%s', password='%s'\n", cfg.Username, cfg.Password)
 	fmt.Printf(" • Panel Web / Wizard : http%s://%s:%d/\n", map[bool]string{true: "s", false: ""}[cfg.EnableTLS], cfg.GetPublicIP(), cfg.HTTPPort)
@@ -676,12 +949,63 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 	fmt.Println("==================================================================")
 }
 
-func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager) {
+func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	currentWiFiSSID := ""
+	for _, f := range []string{"/media/mmcblk0p1/wifi.txt", "/boot/wifi.txt"} {
+		if data, err := os.ReadFile(f); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(strings.ToUpper(line), "SSID=") {
+					currentWiFiSSID = strings.Trim(strings.TrimPrefix(line, "SSID="), "\"'\r ")
+					break
+				}
+			}
+		}
+		if currentWiFiSSID != "" {
+			break
+		}
+	}
+
 
 	_, configJSONBytes, pairURL := generatePairConfig(cfg)
 	upnpReport := upnpMgr.GetReport()
 	duckStatus := duckMgr.GetStatus()
+	sessions, activeCount, blockedCount := turnMonitor.GetActiveSessions()
+
+	var sessionsRows strings.Builder
+	if len(sessions) == 0 {
+		sessionsRows.WriteString(`<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:14px;">No hay sesiones TURN de vídeo activas en este instante.</td></tr>`)
+	} else {
+		for _, s := range sessions {
+			remaining := time.Until(s.ExpiresAt)
+			remainingStr := fmt.Sprintf("%dm", int(remaining.Minutes()))
+			if remaining.Hours() >= 1 {
+				remainingStr = fmt.Sprintf("%dh %dm", int(remaining.Hours()), int(remaining.Minutes())%60)
+			}
+			if remaining <= 0 {
+				remainingStr = "Expirado"
+			}
+
+			statusBadge := `<span class="badge badge-success">🟢 Activo</span>`
+			if s.Status == "expired" {
+				statusBadge = `<span class="badge badge-muted">⏳ Expirado</span>`
+			} else if s.Status == "blocked" {
+				statusBadge = `<span class="badge badge-error">🚫 Bloqueado</span>`
+			}
+
+			trafficMB := float64(s.BytesRelayed) / (1024 * 1024)
+
+			sessionsRows.WriteString(fmt.Sprintf(`<tr>
+				<td style="padding:10px; font-family:monospace; color:var(--accent);">%s</td>
+				<td style="padding:10px;">%s</td>
+				<td style="padding:10px;">%.2f MB</td>
+				<td style="padding:10px;">%s</td>
+				<td style="padding:10px;">%s</td>
+			</tr>`, s.Username, s.ClientIP, trafficMB, remainingStr, statusBadge))
+		}
+	}
 
 	qrPNG, _ := qrcode.Encode(pairURL, qrcode.Medium, 256)
 	qrBase64 := base64.StdEncoding.EncodeToString(qrPNG)
@@ -710,33 +1034,33 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		}
 	}
 
+	topicInfoHash := DeriveInfoHash(cfg.TopicID)
+
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pingo Node - Panel de Control y Diagnóstico</title>
+    <title>Pingo Standalone Server Dashboard</title>
     <style>
         :root {
             --bg: #0b0f19;
-            --card-bg: #151e2e;
-            --primary: #4f46e5;
-            --primary-hover: #4338ca;
-            --text: #f8fafc;
+            --card-bg: #111827;
+            --border: #1f2937;
+            --accent: #38bdf8;
+            --accent-hover: #0ea5e9;
+            --text-main: #f8fafc;
             --text-muted: #94a3b8;
             --success: #10b981;
             --warning: #f59e0b;
             --error: #ef4444;
-            --border: #243044;
-            --accent: #06b6d4;
         }
-        * { box-sizing: border-box; }
         body {
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg);
-            color: var(--text);
+            color: var(--text-main);
             margin: 0;
-            padding: 24px;
+            padding: 20px;
             display: flex;
             justify-content: center;
         }
@@ -751,14 +1075,12 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
         .header h1 {
             margin: 0 0 8px 0;
             font-size: 1.8rem;
-            letter-spacing: -0.5px;
         }
         .badges-row {
             display: flex;
             justify-content: center;
             gap: 10px;
             flex-wrap: wrap;
-            margin-top: 10px;
         }
         .badge {
             padding: 4px 12px;
@@ -771,7 +1093,6 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
         }
         .badge-success { background: rgba(16, 185, 129, 0.15); color: var(--success); border: 1px solid rgba(16, 185, 129, 0.3); }
         .badge-warning { background: rgba(245, 158, 11, 0.15); color: var(--warning); border: 1px solid rgba(245, 158, 11, 0.3); }
-        .badge-error { background: rgba(239, 68, 68, 0.15); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.3); }
         .badge-muted { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); border: 1px solid rgba(148, 163, 184, 0.2); }
         .dot { width: 8px; height: 8px; border-radius: 50%%; display: inline-block; background: currentColor; }
         
@@ -781,7 +1102,6 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             border-radius: 14px;
             padding: 20px;
             margin-bottom: 20px;
-            box-shadow: 0 8px 16px -4px rgba(0,0,0,0.3);
         }
         .card h3 {
             margin-top: 0;
@@ -802,61 +1122,63 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             background: white;
             padding: 12px;
             border-radius: 10px;
-            display: inline-block;
             box-shadow: 0 4px 12px rgba(0,0,0,0.2);
         }
         .qr-box img { display: block; border-radius: 4px; }
         
         .btn {
-            background: var(--primary);
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 8px;
+            background: var(--accent);
+            color: #0b0f19;
             font-weight: 600;
-            font-size: 0.95rem;
+            border: none;
+            padding: 10px 18px;
+            border-radius: 8px;
             cursor: pointer;
             text-decoration: none;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            transition: all 0.2s ease;
+            gap: 6px;
+            font-size: 0.95rem;
+            transition: background 0.15s ease;
         }
-        .btn:hover { background: var(--primary-hover); transform: translateY(-1px); }
+        .btn:hover { background: var(--accent-hover); }
         .btn-secondary {
             background: rgba(255,255,255,0.08);
+            color: var(--text-main);
             border: 1px solid var(--border);
-            color: var(--text);
         }
-        .btn-secondary:hover { background: rgba(255,255,255,0.15); }
+        .btn-secondary:hover { background: rgba(255,255,255,0.12); }
         
         .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr auto;
-            gap: 12px;
-            align-items: end;
+            display: flex;
+            gap: 10px;
             margin-top: 12px;
+            flex-wrap: wrap;
         }
-        @media (max-width: 600px) {
-            .form-row { grid-template-columns: 1fr; }
+        .form-group {
+            flex: 1;
+            min-width: 200px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
         }
         .form-group label {
-            display: block;
             font-size: 0.8rem;
             color: var(--text-muted);
-            margin-bottom: 6px;
             font-weight: 500;
         }
         .form-control {
-            width: 100%%;
-            background: #090d16;
+            background: rgba(0,0,0,0.25);
             border: 1px solid var(--border);
-            border-radius: 6px;
+            border-radius: 8px;
             padding: 9px 12px;
-            color: var(--text);
+            color: white;
             font-size: 0.9rem;
         }
-        .form-control:focus { outline: none; border-color: var(--primary); }
+        .form-control:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
         
         .grid {
             display: grid;
@@ -865,43 +1187,26 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             margin-top: 12px;
         }
         .stat {
-            background: rgba(255,255,255,0.02);
-            padding: 12px 14px;
+            background: rgba(0,0,0,0.2);
+            padding: 12px;
             border-radius: 8px;
             border: 1px solid var(--border);
         }
-        .stat-label {
-            color: var(--text-muted);
-            font-size: 0.72rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .stat-val {
-            font-size: 1.1rem;
-            font-weight: 700;
-            margin-top: 4px;
-            color: #e2e8f0;
-        }
+        .stat-label { color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; }
+        .stat-val { font-size: 1.05rem; font-weight: 700; margin-top: 4px; color: #e2e8f0; }
         pre {
             background: #090d16;
             border: 1px solid var(--border);
             padding: 12px;
             border-radius: 8px;
             overflow-x: auto;
-            color: #38bdf8;
+            color: var(--accent);
             font-size: 0.82rem;
-            margin-top: 8px;
         }
-        .alert {
-            padding: 12px;
-            border-radius: 8px;
-            font-size: 0.88rem;
-            margin-top: 12px;
-            line-height: 1.4;
-        }
-        .alert-info { background: rgba(6, 182, 212, 0.12); border: 1px solid rgba(6, 182, 212, 0.25); color: #67e8f9; }
-        .alert-warning { background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.25); color: #fcd34d; }
+        .alert { padding: 12px; border-radius: 8px; font-size: 0.88rem; margin-top: 12px; }
         .alert-success { background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.25); color: #6ee7b7; }
+        .alert-warning { background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.25); color: #fcd34d; }
+        .alert-info { background: rgba(6, 182, 212, 0.12); border: 1px solid rgba(6, 182, 212, 0.25); color: #67e8f9; }
     </style>
 </head>
 <body>
@@ -910,15 +1215,15 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             <h1>📡 Nodo Privado Pingo</h1>
             <div class="badges-row">
                 <div class="badge badge-success"><span class="dot"></span> Señalización & Relé Activos</div>
+                <div class="badge badge-success"><span class="dot"></span> mDNS: pingo.local</div>
                 <div class="badge %s" id="upnp-badge"><span class="dot"></span> %s</div>
                 <div class="badge %s" id="duck-badge"><span class="dot"></span> %s</div>
             </div>
         </div>
 
-        <!-- QR & Pairing Card -->
         <div class="card qr-section">
             <h2 style="margin:0;">📲 Vinculación Rápida con la App Pingo</h2>
-            <p style="color: var(--text-muted); margin: 0; font-size: 0.95rem;">Escanea el QR con la cámara de tu móvil o abre el enlace en tu navegador:</p>
+            <p style="color: var(--text-muted); margin: 0; font-size: 0.95rem;">Escanea el QR o abre el enlace para importar la configuración:</p>
             <div class="qr-box">
                 <img id="qr-img" src="data:image/png;base64,%s" alt="QR de Vinculación" width="220" height="220">
             </div>
@@ -928,13 +1233,85 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             </div>
         </div>
 
-        <!-- DuckDNS Wizard Card -->
+        <div class="card">
+            <h3>
+                <span>🔑 Red Comunitaria & Topic P2P</span>
+                <span class="badge badge-success" style="font-size:0.75rem;">WebTorrent Tracker Activo</span>
+            </h3>
+            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0;">Los móviles y amigos que configuren esta misma Red Comunitaria en su app Pingo descubrirán automáticamente este servidor TURN sin introducir IPs.</p>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Nombre de Red / Topic ID</label>
+                    <input type="text" id="topic-id-input" class="form-control" placeholder="ej. amigos-valencia" value="%s">
+                </div>
+                <div class="form-group">
+                    <label>InfoHash Swarm (Auto-generado)</label>
+                    <input type="text" class="form-control" value="%s" readonly style="color:var(--accent); background:rgba(0,0,0,0.4);">
+                </div>
+                <div class="form-group" style="flex:0.5; min-width:140px; justify-content:flex-end;">
+                    <button id="save-topic-btn" onclick="saveTopicID()" class="btn" style="width:100%%;">💾 Guardar Red</button>
+                </div>
+            </div>
+            <div id="topic-alert" class="alert alert-success" style="display:none;"></div>
+        </div>
+
+        
+        <div class="card" style="border: 1px solid rgba(59, 130, 246, 0.4);">
+            <h3>
+                <span>📶 Conectar a mi Router Wi-Fi & Salida a Internet</span>
+                <span class="badge badge-warning" style="font-size:0.75rem;">Aprovisionamiento Wi-Fi</span>
+            </h3>
+            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 14px 0;">
+                Configura la red Wi-Fi doméstica para que la Raspberry Pi se conecte a Internet, salga del modo Hotspot y se registre con mDNS y DuckDNS.
+            </p>
+            <div class="form-row">
+                <div class="form-group" style="flex: 1.5;">
+                    <label>Nombre de la red Wi-Fi (SSID)</label>
+                    <input type="text" id="wifi-ssid-input" class="form-control" placeholder="MiFibra_2.4G (Banda 2.4GHz)" value="%s">
+                </div>
+                <div class="form-group" style="flex: 1.5;">
+                    <label>Contraseña Wi-Fi</label>
+                    <input type="password" id="wifi-pass-input" class="form-control" placeholder="Contraseña de la red">
+                </div>
+            </div>
+            
+            <div style="margin-top: 10px; display: flex; align-items: center; gap: 20px;">
+                <label style="font-size: 0.88rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                    <input type="radio" name="ip_mode" value="dhcp" checked onchange="toggleIPFields()"> 🟢 DHCP Automático (Recomendado)
+                </label>
+                <label style="font-size: 0.88rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                    <input type="radio" name="ip_mode" value="static" onchange="toggleIPFields()"> ⚙️ IP Estática Manual
+                </label>
+            </div>
+
+            <div id="static-ip-container" class="form-row" style="display: none; margin-top: 12px;">
+                <div class="form-group">
+                    <label>IP Fija Deseada</label>
+                    <input type="text" id="wifi-ip-input" class="form-control" placeholder="192.168.1.50">
+                </div>
+                <div class="form-group">
+                    <label>Gateway (Router)</label>
+                    <input type="text" id="wifi-gw-input" class="form-control" placeholder="192.168.1.1">
+                </div>
+                <div class="form-group">
+                    <label>Servidores DNS</label>
+                    <input type="text" id="wifi-dns-input" class="form-control" placeholder="1.1.1.1 8.8.8.8">
+                </div>
+            </div>
+
+            <div style="margin-top: 16px;">
+                <button id="save-wifi-btn" onclick="saveWiFiAndReboot()" class="btn" style="width: 100%%; padding: 12px; font-weight: bold; background: var(--accent); color: white;">
+                    💾 Guardar y Reiniciar Raspberry Pi
+                </button>
+            </div>
+            <div id="wifi-alert" class="alert" style="display: none; margin-top: 12px;"></div>
+        </div>
+
         <div class="card">
             <h3>
                 <span>🦆 Asistente DuckDNS (DNS Dinámico)</span>
                 <span style="font-size:0.8rem; font-weight:normal; color:var(--text-muted);">Gratuito en <a href="https://www.duckdns.org" target="_blank" style="color:var(--accent);">duckdns.org</a></span>
             </h3>
-            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0;">Permite que tu nodo conserve un dominio fijo (ej. <code>tunombre.duckdns.org</code>) aunque tu proveedor de internet cambie tu IP pública.</p>
             <div class="form-row">
                 <div class="form-group">
                     <label>Subdominio DuckDNS</label>
@@ -944,67 +1321,61 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                     <label>Token Privado</label>
                     <input type="password" id="duck-token-input" class="form-control" placeholder="xxxxxxxx-xxxx-xxxx-xxxx" value="%s">
                 </div>
-                <div class="form-group">
-                    <button id="save-duck-btn" onclick="saveDuckDNS()" class="btn">💾 Probar y Guardar</button>
+                <div class="form-group" style="flex:0.5; min-width:140px; justify-content:flex-end;">
+                    <button id="save-duck-btn" onclick="saveDuckDNS()" class="btn" style="width:100%%;">💾 Probar y Guardar</button>
                 </div>
             </div>
             <div id="duck-alert" class="alert %s" style="display:%s;">%s</div>
         </div>
 
-        <!-- UPnP & CGNAT Diagnostics Card -->
-        <div class="card">
-            <h3>
-                <span>🔍 Diagnóstico de Red & UPnP</span>
-                <button onclick="reScanUPnP()" id="scan-upnp-btn" class="btn btn-secondary" style="font-size:0.8rem; padding:6px 12px;">🔄 Re-escanear Router</button>
-            </h3>
-            <div class="grid">
-                <div class="stat">
-                    <div class="stat-label">Estado UPnP Router</div>
-                    <div class="stat-val" id="stat-upnp">%s</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-label">Diagnóstico NAT / CGNAT</div>
-                    <div class="stat-val" id="stat-cgnat">%s</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-label">IP Router / WAN</div>
-                    <div class="stat-val" id="stat-router-ip">%s</div>
-                </div>
-                <div class="stat">
-                    <div class="stat-label">IP Pública Detectada</div>
-                    <div class="stat-val" id="stat-public-ip">%s</div>
-                </div>
-            </div>
-            <div id="upnp-msg-alert" class="alert %s">%s</div>
-        </div>
-
-        <!-- Server Statistics -->
         <div class="card">
             <h3>📊 Métricas del Servidor</h3>
             <div class="grid">
                 <div class="stat">
-                    <div class="stat-label">Clientes Conectados</div>
+                    <div class="stat-label">Clientes Señalización</div>
                     <div class="stat-val">%d</div>
                 </div>
                 <div class="stat">
-                    <div class="stat-label">Host Configurado</div>
-                    <div class="stat-val" id="stat-host">%s</div>
+                    <div class="stat-label">Swarm WebTorrent</div>
+                    <div class="stat-val">%d activos</div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Puerto Señalización (WS)</div>
                     <div class="stat-val">%d</div>
                 </div>
                 <div class="stat">
-                    <div class="stat-label">Puerto TURN/STUN (UDP)</div>
+                    <div class="stat-label">Puerto TURN/STUN</div>
                     <div class="stat-val">%d</div>
                 </div>
             </div>
         </div>
 
-        <!-- JSON Configuration -->
+        <div class="card">
+            <h3>
+                <span>🛡️ Sesiones TURN Activas & Control de Abusos</span>
+                <span class="badge %s" style="font-size:0.75rem;">%d Activas &bull; %d IPs Bloqueadas</span>
+            </h3>
+            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 12px 0;">Monitor en tiempo real de retransmisión de vídeo WebRTC y expiración de tokens dinámicos.</p>
+            <div style="overflow-x:auto;">
+                <table style="width:100%%; border-collapse:collapse; font-size:0.88rem; text-align:left;">
+                    <thead>
+                        <tr style="border-bottom:1px solid var(--border); color:var(--text-muted); font-size:0.75rem; text-transform:uppercase;">
+                            <th style="padding:8px 10px;">Usuario / Token</th>
+                            <th style="padding:8px 10px;">IP Origen</th>
+                            <th style="padding:8px 10px;">Tráfico Relé</th>
+                            <th style="padding:8px 10px;">Expiración</th>
+                            <th style="padding:8px 10px;">Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        %s
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <div class="card">
             <h3>⚙️ Configuración JSON para Pingo</h3>
-            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0;">Para importar manualmente en Pingo (<i>Ajustes &rarr; Servidores &rarr; Importar JSON</i>):</p>
             <pre id="json-preview">%s</pre>
         </div>
     </div>
@@ -1016,6 +1387,45 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             navigator.clipboard.writeText(currentPairURL).then(() => {
                 alert("¡Enlace de vinculación copiado al portapapeles!");
             });
+        }
+
+        async function saveTopicID() {
+            const topic_id = document.getElementById("topic-id-input").value.trim();
+            const btn = document.getElementById("save-topic-btn");
+            const alertBox = document.getElementById("topic-alert");
+
+            if (!topic_id) {
+                alert("Introduce un nombre de red comunitaria (ej. amigos-valencia).");
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerText = "⏳ Guardando...";
+
+            try {
+                const res = await fetch("/api/config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ topic_id })
+                });
+                const data = await res.json();
+                alertBox.style.display = "block";
+                if (data.success) {
+                    alertBox.className = "alert alert-success";
+                    alertBox.innerText = "✅ Red Comunitaria guardada con éxito en .env!";
+                    setTimeout(() => window.location.reload(), 1500);
+                } else {
+                    alertBox.className = "alert alert-warning";
+                    alertBox.innerText = "⚠️ Error guardando configuración.";
+                }
+            } catch (err) {
+                alertBox.style.display = "block";
+                alertBox.className = "alert alert-warning";
+                alertBox.innerText = "Error: " + err.message;
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "💾 Guardar Red";
+            }
         }
 
         async function saveDuckDNS() {
@@ -1047,7 +1457,6 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                     if (data.pair_url) {
                         currentPairURL = data.pair_url;
                         document.getElementById("pair-btn").href = data.pair_url;
-                        document.getElementById("stat-host").innerText = data.public_host;
                     }
                     setTimeout(() => window.location.reload(), 1500);
                 } else {
@@ -1063,30 +1472,6 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 btn.innerText = "💾 Probar y Guardar";
             }
         }
-
-        async function reScanUPnP() {
-            const btn = document.getElementById("scan-upnp-btn");
-            btn.disabled = true;
-            btn.innerText = "⏳ Escaneando...";
-
-            try {
-                const res = await fetch("/api/upnp/scan", { method: "POST" });
-                const data = await res.json();
-                if (data.upnp) {
-                    const alertBox = document.getElementById("upnp-msg-alert");
-                    alertBox.innerText = data.upnp.message;
-                    alertBox.className = data.upnp.has_cgnat ? "alert alert-warning" : (data.upnp.active ? "alert alert-success" : "alert alert-info");
-                    document.getElementById("stat-upnp").innerText = data.upnp.active ? "Activo" : "No detectado";
-                    document.getElementById("stat-cgnat").innerText = data.upnp.has_cgnat ? "⚠️ CGNAT" : "✅ Directa";
-                    document.getElementById("stat-router-ip").innerText = data.upnp.router_external_ip || "-";
-                }
-            } catch (e) {
-                alert("Error al re-escanear UPnP: " + e.message);
-            } finally {
-                btn.disabled = false;
-                btn.innerText = "🔄 Re-escanear Router";
-            }
-        }
     </script>
 </body>
 </html>`,
@@ -1094,21 +1479,22 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		duckBadgeClass, duckBadgeText,
 		qrBase64,
 		pairURL,
+		cfg.TopicID,
+		topicInfoHash,
+		currentWiFiSSID,
 		cfg.DuckDomain,
 		cfg.DuckToken,
 		map[bool]string{true: "alert-success", false: "alert-info"}[duckStatus.LastSuccess],
 		map[bool]string{true: "block", false: "none"}[duckStatus.Enabled],
 		duckStatus.LastMessage,
-		map[bool]string{true: "✅ Activo", false: "❌ No detectado"}[upnpReport.Active],
-		map[bool]string{true: "⚠️ CGNAT", false: "✅ Directa"}[upnpReport.HasCGNAT],
-		map[bool]string{true: upnpReport.RouterExternalIP, false: "-"}[upnpReport.RouterExternalIP != ""],
-		upnpReport.PublicInternetIP,
-		map[bool]string{true: "alert-warning", false: map[bool]string{true: "alert-success", false: "alert-info"}[upnpReport.Active]}[upnpReport.HasCGNAT],
-		upnpReport.Message,
 		sigServer.ClientCount(),
-		cfg.GetPublicIP(),
+		tracker.SwarmCount(),
 		cfg.HTTPPort,
 		cfg.TURNPort,
+		map[bool]string{true: "badge-warning", false: "badge-success"}[blockedCount > 0],
+		activeCount,
+		blockedCount,
+		sessionsRows.String(),
 		string(configJSONBytes),
 		pairURL,
 	)

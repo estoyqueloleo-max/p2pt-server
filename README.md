@@ -8,15 +8,19 @@ Elimina la necesidad de instalar Docker, Node.js o configurar Coturn por separad
 
 ## ✨ Características
 
-- ⚡ **Binario Único sin Dependencias**: Compilado en Go estático.
+- ⚡ **Binario Único sin Dependencias**: Compilado en Go estático (~8 MB).
 - 📡 **Señalización PeerJS Integrada**: Conexiones WebSocket nativas para intercambio de SDP/ICE y presencia.
 - 🔄 **Relé TURN/STUN Integrado**: Servidor UDP de alto rendimiento con `pion/turn` para atravesar NATs simétricos y redes móviles (4G/5G).
+- 📶 **Auto-Descubrimiento Local mDNS**: Anuncio `_pingo._tcp` y resolución automática como `http://pingo.local:9000/`.
+- 🔄 **Auto-Actualización en Segundo Plano**: Chequeo periódico de releases en GitHub y reemplazo atómico de binario.
 - 🔌 **Auto-Apertura UPnP & Diagnóstico CGNAT**: Detecta tu router automáticamente, abre los puertos UDP/TCP sin tocar el panel del router y te avisa si tu operadora tiene CGNAT activo.
 - 🦆 **Integración con DuckDNS (`duckdns.org`)**: Sincronización automática de tu IP pública dinámica con tu subdominio gratuito cada 10 minutos.
 - 🧙 **Asistente Interactivo (CLI & Web)**: Asistente paso a paso en terminal (`-wizard`) o directamente desde el panel web de control.
 - 📲 **Auto-Vinculación por QR / URL**: Muestra en la consola de terminal y en la web un código QR interactivo y enlace directo para vincular la app Pingo en 1 clic.
-- ⚙️ **Multiplataforma**: Binarios listos para Linux (x86_64 y ARM64 / Raspberry Pi), Windows (`.exe`) y macOS (Apple Silicon e Intel).
-- 🔒 **Soporte TLS / WSS**: Compatible con certificados SSL directos o detrás de proxys inversos (Nginx, Caddy, Cloudflare Tunnel).
+- ⚙️ **Multiplataforma & Appliance Raspberry Pi Zero**: Binarios y paquetes APK de Alpine listos para Linux (x86_64, ARM64 y ARMv6 / Pi Zero), Windows y macOS.
+- 🔒 **Soporte TLS / WSS**: Compatible con certificados SSL directos o detrás de proxys inversos.
+
+> 📖 Para ver el manual completo de pruebas automatizadas, emulación QEMU y auto-descubrimiento por DHT, consulta la [Guía de Pruebas y Appliance](../docs/TURN_TESTING_AND_APPLIANCE.md).
 
 ---
 
@@ -95,7 +99,9 @@ Abre en tu navegador: `http://localhost:9000/` (o tu IP local / dominio):
 | `-max-port` | - | `65535` | Puerto UDP final para relay WebRTC |
 | `-tls` | - | `false` | Activar HTTPS/WSS directo |
 | `-tls-cert` | - | `cert.pem` | Ruta al certificado TLS |
-| `-tls-key` | - | `key.pem` | Ruta a la clave privada TLS |
+| `-mdns` | `ENABLE_MDNS` | `true` | Activar anuncio local mDNS / Zeroconf (`pingo.local`) |
+| `-no-mdns` | - | `false` | Desactivar anuncio mDNS local |
+| `-auto-update` | `AUTO_UPDATE` | `false` | Activar auto-actualización en segundo plano desde GitHub Releases |
 | `-app-url` | - | `https://pingo.accreativos.com` | URL base de Pingo para generar los enlaces QR |
 
 ---
