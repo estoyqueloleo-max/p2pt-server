@@ -361,7 +361,7 @@ func main() {
 	enableTLS := flag.Bool("tls", false, "Enable TLS for HTTPS/WSS")
 	tlsCert := flag.String("tls-cert", "cert.pem", "TLS Certificate file")
 	tlsKey := flag.String("tls-key", "key.pem", "TLS Private Key file")
-	appURL := flag.String("app-url", "https://pingo.accreativos.com", "Base URL of Pingo app")
+	appURL := flag.String("app-url", "https://estoyqueloleo-max.github.io/p2pt", "Base URL of Pingo app")
 	topicFlag := flag.String("topic", "pingo-public-mesh", "P2P Community Topic / Swarm Network")
 	enableMDNS := flag.Bool("mdns", true, "Enable local mDNS / Zeroconf advertising")
 	noMDNS := flag.Bool("no-mdns", false, "Disable local mDNS advertising")
@@ -391,6 +391,9 @@ func main() {
 	}
 	if envTopic := os.Getenv("TOPIC_ID"); envTopic != "" {
 		*topicFlag = envTopic
+	}
+	if envAppURL := os.Getenv("APP_URL"); envAppURL != "" {
+		*appURL = envAppURL
 	}
 	if envUPnP := os.Getenv("ENABLE_UPNP"); envUPnP == "false" || envUPnP == "0" {
 		*enableUPnP = false
