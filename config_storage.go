@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -63,5 +64,13 @@ TURN_STATIC_AUTH_SECRET=%s
 		cfg.AuthSecret,
 	)
 
-	return os.WriteFile(targetPath, []byte(strings.TrimSpace(content)+"\n"), 0644)
+	err := os.WriteFile(targetPath, []byte(strings.TrimSpace(content)+"\n"), 0644)
+	if err == nil && targetPath == "/etc/p2pt.env" {
+		go func() {
+			_ = exec.Command("mount", "-o", "remount,rw", "/media/mmcblk0p1").Run()
+			_ = exec.Command("/sbin/lbu", "commit", "-d", "mmcblk0p1").Run()
+			_ = exec.Command("mount", "-o", "remount,ro", "/media/mmcblk0p1").Run()
+		}()
+	}
+	return err
 }

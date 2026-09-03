@@ -544,6 +544,9 @@ func main() {
 	tracker := NewWebTorrentTracker()
 	mux := http.NewServeMux()
 
+	var currentTLSCert tls.Certificate
+	var tlsMu sync.RWMutex
+
 	mux.HandleFunc("/tracker", tracker.HandleWebSocket)
 	mux.HandleFunc("/announce", tracker.HandleWebSocket)
 	log.Printf("[Tracker] Endpoint WebTorrent WebSocket listo en ws://0.0.0.0:%d/tracker", cfg.HTTPPort)
@@ -616,7 +619,20 @@ func main() {
 			cfg.DuckDomain = payload.Domain
 			cfg.DuckToken = payload.Token
 			cfg.SetPublicIP(formatFullDomain(payload.Domain))
+			_ = SaveConfigToEnv(cfg)
 			duckMgr.StartBackgroundSync()
+
+			go func() {
+				log.Printf("[DuckDNS] Solicitando certificado oficial Let's Encrypt para %s vía DNS-01...", cfg.DuckDomain)
+				if newCert, err := ObtainOrRenewDuckDNSCert(cfg); err == nil {
+					tlsMu.Lock()
+					currentTLSCert = newCert
+					tlsMu.Unlock()
+					log.Printf("[DuckDNS] 🎉 Certificado SSL Let's Encrypt activado en caliente para %s.duckdns.org", cfg.DuckDomain)
+				} else {
+					log.Printf("[DuckDNS] ⚠️ No se pudo obtener certificado Let's Encrypt: %v", err)
+				}
+			}()
 		}
 
 		status := duckMgr.GetStatus()
@@ -929,6 +945,9 @@ func main() {
 	cert, errTLS := EnsureTLSCertificates(cfg)
 	if errTLS == nil {
 		cfg.EnableTLS = true
+		tlsMu.Lock()
+		currentTLSCert = cert
+		tlsMu.Unlock()
 	} else {
 		log.Printf("[TLS] Advertencia: no se pudo iniciar TLS automático: %v", errTLS)
 	}
@@ -944,7 +963,11 @@ func main() {
 	go func() {
 		if cfg.EnableTLS {
 			httpServer.TLSConfig = &tls.Config{
-				Certificates: []tls.Certificate{cert},
+				GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+					tlsMu.RLock()
+					defer tlsMu.RUnlock()
+					return &currentTLSCert, nil
+				},
 			}
 			log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
 
@@ -956,7 +979,9 @@ func main() {
 					for range renewTicker.C {
 						log.Println("[ACME] Verificando validez y renovación de certificado Let's Encrypt...")
 						if newCert, err := ObtainOrRenewDuckDNSCert(cfg); err == nil {
-							httpServer.TLSConfig.Certificates = []tls.Certificate{newCert}
+							tlsMu.Lock()
+							currentTLSCert = newCert
+							tlsMu.Unlock()
 						}
 					}
 				}()
