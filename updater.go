@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const CurrentVersion = "1.0.0"
+const CurrentVersion = "1.0.1"
 
 type GithubAsset struct {
 	Name               string `json:"name"`

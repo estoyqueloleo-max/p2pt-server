@@ -485,9 +485,9 @@ func main() {
 	// 1. Initialize Turn Monitor & Pion TURN Server
 	turnMonitor := NewTurnMonitor()
 
-	turnUDPListener, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", cfg.TURNPort))
+	turnUDPListener, err := net.ListenPacket("udp", fmt.Sprintf(":%d", cfg.TURNPort))
 	if err != nil {
-		log.Fatalf("[TURN] Failed to listen on UDP port %d: %v", cfg.TURNPort, err)
+		log.Fatalf("[TURN] Failed to listen on UDP port %d (Dual-Stack): %v", cfg.TURNPort, err)
 	}
 	defer turnUDPListener.Close()
 
@@ -925,9 +925,7 @@ func main() {
 		updater.StartBackgroundCheck()
 	}
 
-	_, configJSON, pairURL := generatePairConfig(cfg)
-	printBanner(cfg, pairURL, configJSON, upnpMgr.GetReport(), duckMgr.GetStatus())
-
+	// 7. Initialize TLS Certificates (Let's Encrypt via DuckDNS DNS-01 or Local/Self-Signed fallback)
 	cert, errTLS := EnsureTLSCertificates(cfg)
 	if errTLS == nil {
 		cfg.EnableTLS = true
@@ -935,8 +933,11 @@ func main() {
 		log.Printf("[TLS] Advertencia: no se pudo iniciar TLS automático: %v", errTLS)
 	}
 
+	_, configJSON, pairURL := generatePairConfig(cfg)
+	printBanner(cfg, pairURL, configJSON, upnpMgr.GetReport(), duckMgr.GetStatus())
+
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf("0.0.0.0:%d", cfg.HTTPPort),
+		Addr:    fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler: mux,
 	}
 
@@ -945,12 +946,27 @@ func main() {
 			httpServer.TLSConfig = &tls.Config{
 				Certificates: []tls.Certificate{cert},
 			}
-			log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en 0.0.0.0:%d...", cfg.HTTPPort)
+			log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
+
+			// Iniciar tarea de renovación automática de certificados si se usa DuckDNS
+			if cfg.DuckDomain != "" && cfg.DuckToken != "" {
+				go func() {
+					renewTicker := time.NewTicker(24 * time.Hour)
+					defer renewTicker.Stop()
+					for range renewTicker.C {
+						log.Println("[ACME] Verificando validez y renovación de certificado Let's Encrypt...")
+						if newCert, err := ObtainOrRenewDuckDNSCert(cfg); err == nil {
+							httpServer.TLSConfig.Certificates = []tls.Certificate{newCert}
+						}
+					}
+				}()
+			}
+
 			if err := httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("[Signaling] Error HTTPS: %v", err)
 			}
 		} else {
-			log.Printf("[Signaling] 🌐 Servidor HTTP / WS activo en 0.0.0.0:%d...", cfg.HTTPPort)
+			log.Printf("[Signaling] 🌐 Servidor HTTP / WS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
 			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Fatalf("[Signaling] Error HTTP: %v", err)
 			}
@@ -1004,8 +1020,14 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 	// DuckDNS Status
 	if duck.Enabled {
 		fmt.Printf(" • DuckDNS DDNS       : ✅ %s (Sincronización activa cada 10 min)\n", duck.FullDomain)
+		if duck.CurrentIPv6 != "" {
+			fmt.Printf(" • IPv6 Global        : ✅ %s (Sin CGNAT / AAAA activo)\n", duck.CurrentIPv6)
+		}
 	} else {
 		fmt.Println(" • DuckDNS DDNS       : ℹ️ No configurado (usando IP directa)")
+		if ipv6 := GetGlobalIPv6(); ipv6 != "" {
+			fmt.Printf(" • IPv6 Global        : 🌐 %s (Disponible en red local/Internet)\n", ipv6)
+		}
 	}
 
 	fmt.Println("------------------------------------------------------------------")

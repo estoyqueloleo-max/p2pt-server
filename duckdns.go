@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -21,7 +22,56 @@ type DuckDNSStatus struct {
 	LastSuccess  bool      `json:"last_success"`
 	LastMessage  string    `json:"last_message"`
 	CurrentIP    string    `json:"current_ip,omitempty"`
+	CurrentIPv6  string    `json:"current_ipv6,omitempty"`
 	NextUpdateIn string    `json:"next_update_in,omitempty"`
+}
+
+// GetGlobalIPv6 discovers the first global unicast IPv6 address on active non-loopback interfaces
+func GetGlobalIPv6() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if isGlobalUnicastIPv6(ip) {
+				return ip.String()
+			}
+		}
+	}
+	return ""
+}
+
+func isGlobalUnicastIPv6(ip net.IP) bool {
+	if ip == nil || ip.To4() != nil {
+		return false
+	}
+	if !ip.IsGlobalUnicast() {
+		return false
+	}
+	// Exclude Unique Local Addresses (ULA, fc00::/7)
+	if len(ip) == net.IPv6len && (ip[0]&0xfe) == 0xfc {
+		return false
+	}
+	// Exclude Link-Local Unicast (fe80::/10)
+	if ip.IsLinkLocalUnicast() {
+		return false
+	}
+	return true
 }
 
 type DuckDNSManager struct {
@@ -84,7 +134,11 @@ func (d *DuckDNSManager) Update(ctx context.Context, customIP string) (bool, str
 		SyncSystemClock()
 	}
 
+	ipv6 := GetGlobalIPv6()
 	url := fmt.Sprintf("https://www.duckdns.org/update?domains=%s&token=%s&ip=%s", domain, token, customIP)
+	if ipv6 != "" {
+		url += fmt.Sprintf("&ipv6=%s", ipv6)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -111,7 +165,7 @@ func (d *DuckDNSManager) Update(ctx context.Context, customIP string) (bool, str
 
 	if err != nil {
 		msg := fmt.Sprintf("Error de conexión con DuckDNS: %v", err)
-		d.setStatus(false, msg, "")
+		d.setStatus(false, msg, "", "")
 		return false, msg, err
 	}
 	defer resp.Body.Close()
@@ -119,7 +173,7 @@ func (d *DuckDNSManager) Update(ctx context.Context, customIP string) (bool, str
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		msg := fmt.Sprintf("Error leyendo respuesta de DuckDNS: %v", err)
-		d.setStatus(false, msg, "")
+		d.setStatus(false, msg, "", "")
 		return false, msg, err
 	}
 
@@ -128,7 +182,10 @@ func (d *DuckDNSManager) Update(ctx context.Context, customIP string) (bool, str
 
 	if strings.Contains(bodyStr, "OK") {
 		msg := fmt.Sprintf("DuckDNS actualizado correctamente (%s)", fullDom)
-		d.setStatus(true, msg, customIP)
+		if ipv6 != "" {
+			msg += fmt.Sprintf(" [IPv6: %s]", ipv6)
+		}
+		d.setStatus(true, msg, customIP, ipv6)
 		if d.onUpdateFunc != nil {
 			d.onUpdateFunc(fullDom, customIP)
 		}
@@ -137,12 +194,12 @@ func (d *DuckDNSManager) Update(ctx context.Context, customIP string) (bool, str
 	}
 
 	msg := "DuckDNS respondió KO (verifica que el subdominio y el Token sean correctos)"
-	d.setStatus(false, msg, "")
+	d.setStatus(false, msg, "", "")
 	log.Printf("[DuckDNS] ❌ %s", msg)
 	return false, msg, fmt.Errorf("duckdns rejected credentials (KO)")
 }
 
-func (d *DuckDNSManager) setStatus(success bool, msg, ip string) {
+func (d *DuckDNSManager) setStatus(success bool, msg, ip, ipv6 string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -155,6 +212,53 @@ func (d *DuckDNSManager) setStatus(success bool, msg, ip string) {
 	if ip != "" {
 		d.status.CurrentIP = ip
 	}
+	if ipv6 != "" {
+		d.status.CurrentIPv6 = ipv6
+	}
+}
+
+// SetDuckDNSTXTRecord sets the TXT record in DuckDNS for ACME DNS-01 challenges
+func SetDuckDNSTXTRecord(ctx context.Context, domain, token, txt string) error {
+	cleanDom := cleanDuckDomain(domain)
+	url := fmt.Sprintf("https://www.duckdns.org/update?domains=%s&token=%s&txt=%s", cleanDom, strings.TrimSpace(token), strings.TrimSpace(txt))
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error llamando API DuckDNS TXT: %w", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "OK") {
+		return fmt.Errorf("duckdns rechazó actualización TXT: %s", string(b))
+	}
+	log.Printf("[DuckDNS-ACME] TXT record publicado para %s.duckdns.org", cleanDom)
+	return nil
+}
+
+// ClearDuckDNSTXTRecord clears the TXT record in DuckDNS
+func ClearDuckDNSTXTRecord(ctx context.Context, domain, token string) error {
+	cleanDom := cleanDuckDomain(domain)
+	url := fmt.Sprintf("https://www.duckdns.org/update?domains=%s&token=%s&txt=&clear=true", cleanDom, strings.TrimSpace(token))
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error limpiando TXT en DuckDNS: %w", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "OK") {
+		return fmt.Errorf("duckdns rechazó borrado TXT: %s", string(b))
+	}
+	log.Printf("[DuckDNS-ACME] TXT record limpiado para %s.duckdns.org", cleanDom)
+	return nil
 }
 
 func (d *DuckDNSManager) StartBackgroundSync() {

@@ -18,8 +18,18 @@ import (
 	"time"
 )
 
-// EnsureTLSCertificates busca o genera automáticamente certificados TLS con soporte para IPs locales, nip.io y mDNS
+// EnsureTLSCertificates busca o genera automáticamente certificados TLS con soporte para Let's Encrypt (DuckDNS), IPs locales, nip.io y mDNS
 func EnsureTLSCertificates(cfg *Config) (tls.Certificate, error) {
+	// 1. Si DuckDNS está configurado, intentar obtener o reutilizar certificado oficial Let's Encrypt vía DNS-01
+	if cfg.DuckDomain != "" && cfg.DuckToken != "" {
+		if cert, err := ObtainOrRenewDuckDNSCert(cfg); err == nil {
+			log.Printf("[TLS] ✅ Usando certificado SSL oficial Let's Encrypt para %s.duckdns.org", cleanDuckDomain(cfg.DuckDomain))
+			return cert, nil
+		} else {
+			log.Printf("[TLS] Aviso: No se pudo obtener certificado Let's Encrypt para DuckDNS (%v). Usando certificados locales o autofirmados...", err)
+		}
+	}
+
 	certPaths := []string{
 		cfg.TLSCertFile,
 		"/media/mmcblk0p1/cert.pem",

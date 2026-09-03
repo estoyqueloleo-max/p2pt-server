@@ -33,20 +33,21 @@ GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$OUTPUT_DIR
 
 # Generar paquetes APK si nfpm está disponible
 NFPM_BIN=$(which nfpm 2>/dev/null || echo "$HOME/go/bin/nfpm")
+VERSION="${VERSION:-1.0.1}"
 if [ -x "$NFPM_BIN" ] && [ -f "${SCRIPT_DIR}/nfpm.yaml" ]; then
     echo -e "\n📦 Generando paquetes APK para Alpine Linux con nfpm..."
     
     # APK armhf (Pi Zero)
     ARCH="armhf" BIN_PATH="${OUTPUT_DIR}/p2pt-server-linux-armhf" envsubst < "${SCRIPT_DIR}/nfpm.yaml" | \
-        "$NFPM_BIN" pkg -f - --packager apk --target "$OUTPUT_DIR/p2pt-server_1.0.0_armhf.apk"
+        "$NFPM_BIN" pkg -f - --packager apk --target "$OUTPUT_DIR/p2pt-server_${VERSION}_armhf.apk"
     
     # APK arm64 (Pi 3/4/5)
     ARCH="arm64" BIN_PATH="${OUTPUT_DIR}/p2pt-server-linux-arm64" envsubst < "${SCRIPT_DIR}/nfpm.yaml" | \
-        "$NFPM_BIN" pkg -f - --packager apk --target "$OUTPUT_DIR/p2pt-server_1.0.0_arm64.apk"
+        "$NFPM_BIN" pkg -f - --packager apk --target "$OUTPUT_DIR/p2pt-server_${VERSION}_arm64.apk"
     
     # APK amd64 (x86_64)
     ARCH="x86_64" BIN_PATH="${OUTPUT_DIR}/p2pt-server-linux-amd64" envsubst < "${SCRIPT_DIR}/nfpm.yaml" | \
-        "$NFPM_BIN" pkg -f - --packager apk --target "$OUTPUT_DIR/p2pt-server_1.0.0_x86_64.apk"
+        "$NFPM_BIN" pkg -f - --packager apk --target "$OUTPUT_DIR/p2pt-server_${VERSION}_x86_64.apk"
 fi
 
 echo -e "\n✅ Artefactos generados con éxito en server/dist/:"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"runtime"
 	"testing"
 )
@@ -46,3 +47,46 @@ func TestUpdater_GetBinaryAssetName(t *testing.T) {
 	}
 	t.Log("✅ Binary asset name derivation validated!")
 }
+
+func TestIPv6_Classification(t *testing.T) {
+	tests := []struct {
+		ip       string
+		isGlobal bool
+	}{
+		{"2a0c:5a80:1234:5600::50", true},       // Digi Global Unicast
+		{"2001:db8::1", true},                   // Global Unicast doc range
+		{"fe80::ba27:ebff:fe12:3456", false},    // Link-Local
+		{"fc00::1", false},                      // ULA
+		{"fd00:abcd:1234::1", false},            // ULA
+		{"::1", false},                          // Loopback
+		{"127.0.0.1", false},                    // IPv4 Loopback
+		{"192.168.1.50", false},                 // IPv4 Private
+		{"::ffff:192.168.1.50", false},          // IPv4-mapped IPv6
+	}
+
+	for _, tt := range tests {
+		parsed := net.ParseIP(tt.ip)
+		if parsed == nil {
+			t.Fatalf("Failed to parse IP: %s", tt.ip)
+		}
+		got := isGlobalUnicastIPv6(parsed)
+		if got != tt.isGlobal {
+			t.Errorf("isGlobalUnicastIPv6(%q) = %v; want %v", tt.ip, got, tt.isGlobal)
+		}
+	}
+	t.Log("✅ IPv6 Global Unicast filter validated for Digi and global networks!")
+}
+
+func TestDuckDNS_DomainFormatting(t *testing.T) {
+	if got := cleanDuckDomain("mi-pingo.duckdns.org"); got != "mi-pingo" {
+		t.Errorf("cleanDuckDomain = %q; want 'mi-pingo'", got)
+	}
+	if got := cleanDuckDomain("MI-PINGO"); got != "mi-pingo" {
+		t.Errorf("cleanDuckDomain = %q; want 'mi-pingo'", got)
+	}
+	if got := formatFullDomain("mi-pingo"); got != "mi-pingo.duckdns.org" {
+		t.Errorf("formatFullDomain = %q; want 'mi-pingo.duckdns.org'", got)
+	}
+	t.Log("✅ DuckDNS domain formatting validated!")
+}
+
