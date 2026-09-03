@@ -21,7 +21,7 @@ packages:
 
   # Paquete APK generado localmente por build.sh / nfpm:
   apks:
-    - "./dist/p2pt-server_1.0.1_armhf.apk"
+    - "./dist/p2pt-server_1.1.0_armhf.apk"
 
 services:
   # Servicios OpenRC a habilitar automáticamente:
