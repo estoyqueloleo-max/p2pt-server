@@ -180,6 +180,76 @@ func (tm *TurnMonitor) GetActiveSessions() ([]*TurnSession, int, int) {
 	return list, activeCount, blockedCount
 }
 
+// BlockIP manually bans an IP from connecting to TURN for a given duration (or 24h by default)
+func (tm *TurnMonitor) BlockIP(ip string, duration time.Duration) {
+	if ip == "" {
+		return
+	}
+	if duration <= 0 {
+		duration = 24 * time.Hour
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	rep, exists := tm.reputations[ip]
+	if !exists {
+		rep = &IPReputation{IP: ip}
+		tm.reputations[ip] = rep
+	}
+	rep.BlockedUntil = time.Now().Add(duration)
+
+	// Close / mark sessions from this IP as blocked
+	for key, s := range tm.sessions {
+		if s.ClientIP == ip {
+			s.Status = "blocked"
+			delete(tm.sessions, key)
+		}
+	}
+}
+
+// UnblockIP removes an IP from the blocklist
+func (tm *TurnMonitor) UnblockIP(ip string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if rep, exists := tm.reputations[ip]; exists {
+		rep.BlockedUntil = time.Time{}
+		rep.Failures = 0
+	}
+}
+
+// RevokeSession immediately removes an active session
+func (tm *TurnMonitor) RevokeSession(sessionKey string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	if _, exists := tm.sessions[sessionKey]; exists {
+		delete(tm.sessions, sessionKey)
+		return
+	}
+	for key, s := range tm.sessions {
+		if s.Username == sessionKey || fmt.Sprintf("%s@%s", s.Username, s.ClientIP) == sessionKey {
+			delete(tm.sessions, key)
+			break
+		}
+	}
+}
+
+// GetBlockedIPs returns a list of all currently blocked IPs
+func (tm *TurnMonitor) GetBlockedIPs() []*IPReputation {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	var blocked []*IPReputation
+	now := time.Now()
+	for _, rep := range tm.reputations {
+		if now.Before(rep.BlockedUntil) {
+			blocked = append(blocked, rep)
+		}
+	}
+	return blocked
+}
+
 func extractIP(addr string) string {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

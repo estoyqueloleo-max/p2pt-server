@@ -780,6 +780,71 @@ func main() {
 			"active_sessions_count": activeCount,
 			"blocked_ips_count":     blockedCount,
 			"sessions":              sessions,
+			"blocked_ips":           turnMonitor.GetBlockedIPs(),
+		})
+	})
+
+	mux.HandleFunc("/api/turn/block", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != "POST" {
+			http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		var payload struct {
+			IP     string `json:"ip"`
+			Action string `json:"action"` // "block" or "unblock"
+			Hours  int    `json:"hours"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+			return
+		}
+		payload.IP = strings.TrimSpace(payload.IP)
+		if payload.IP == "" {
+			http.Error(w, `{"error":"ip required"}`, http.StatusBadRequest)
+			return
+		}
+
+		if payload.Action == "unblock" {
+			turnMonitor.UnblockIP(payload.IP)
+			log.Printf("[Security] IP %s desbloqueada manualmente desde el panel.", payload.IP)
+		} else {
+			duration := 24 * time.Hour
+			if payload.Hours > 0 {
+				duration = time.Duration(payload.Hours) * time.Hour
+			}
+			turnMonitor.BlockIP(payload.IP, duration)
+			log.Printf("[Security] 🚫 IP %s bloqueada manualmente por %v desde el panel.", payload.IP, duration)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"ip":      payload.IP,
+			"action":  payload.Action,
+			"blocked": turnMonitor.GetBlockedIPs(),
+		})
+	})
+
+	mux.HandleFunc("/api/turn/revoke", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method != "POST" {
+			http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		var payload struct {
+			SessionKey string `json:"session_key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+			return
+		}
+		turnMonitor.RevokeSession(payload.SessionKey)
+		log.Printf("[Security] ⚡ Sesión %s revocada manualmente.", payload.SessionKey)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"revoked": payload.SessionKey,
 		})
 	})
 
@@ -1093,10 +1158,11 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 	upnpReport := upnpMgr.GetReport()
 	duckStatus := duckMgr.GetStatus()
 	sessions, activeCount, blockedCount := turnMonitor.GetActiveSessions()
+	blockedIPs := turnMonitor.GetBlockedIPs()
 
 	var sessionsRows strings.Builder
 	if len(sessions) == 0 {
-		sessionsRows.WriteString(`<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:14px;">No hay sesiones TURN de vídeo activas en este instante.</td></tr>`)
+		sessionsRows.WriteString(`<tr><td colspan="6" style="text-align:center; color:var(--text-muted); padding:14px;">No hay sesiones TURN de vídeo activas en este instante.</td></tr>`)
 	} else {
 		for _, s := range sessions {
 			remaining := time.Until(s.ExpiresAt)
@@ -1117,14 +1183,52 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 
 			trafficMB := float64(s.BytesRelayed) / (1024 * 1024)
 
+			actionBtns := fmt.Sprintf(`<div style="display:flex; gap:6px;">
+				<button onclick="blockIP('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Bloquear IP</button>
+				<button onclick="revokeSession('%s@%s')" class="btn btn-secondary" style="padding:3px 8px; font-size:0.75rem; border-radius:4px; cursor:pointer;">⚡ Expulsar</button>
+			</div>`, s.ClientIP, s.Username, s.ClientIP)
+
 			sessionsRows.WriteString(fmt.Sprintf(`<tr>
 				<td style="padding:10px; font-family:monospace; color:var(--accent);">%s</td>
 				<td style="padding:10px;">%s</td>
 				<td style="padding:10px;">%.2f MB</td>
 				<td style="padding:10px;">%s</td>
 				<td style="padding:10px;">%s</td>
-			</tr>`, s.Username, s.ClientIP, trafficMB, remainingStr, statusBadge))
+				<td style="padding:10px;">%s</td>
+			</tr>`, s.Username, s.ClientIP, trafficMB, remainingStr, statusBadge, actionBtns))
 		}
+	}
+
+	var blockedSectionHTML strings.Builder
+	if len(blockedIPs) > 0 {
+		blockedSectionHTML.WriteString(`<div style="margin-top:16px; padding:12px; background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.2); border-radius:8px;">
+			<h4 style="margin:0 0 8px 0; color:#f87171; font-size:0.88rem; display:flex; align-items:center; gap:6px;">
+				🚫 Lista Negra de IPs Bloqueadas
+				<span class="badge badge-error" style="font-size:0.7rem;">` + fmt.Sprintf("%d Bloqueadas", len(blockedIPs)) + `</span>
+			</h4>
+			<table style="width:100%%; border-collapse:collapse; font-size:0.82rem; text-align:left;">
+				<thead>
+					<tr style="border-bottom:1px solid rgba(255,255,255,0.08); color:var(--text-muted);">
+						<th style="padding:6px 8px;">IP Denegada</th>
+						<th style="padding:6px 8px;">Bloqueada Hasta</th>
+						<th style="padding:6px 8px;">Acción</th>
+					</tr>
+				</thead>
+				<tbody>`)
+		for _, b := range blockedIPs {
+			untilStr := b.BlockedUntil.Format("02 Jan 15:04")
+			if time.Until(b.BlockedUntil).Hours() > 24*365 {
+				untilStr = "Permanente"
+			}
+			blockedSectionHTML.WriteString(fmt.Sprintf(`<tr>
+				<td style="padding:6px 8px; font-family:monospace; color:#f87171;">%s</td>
+				<td style="padding:6px 8px; color:var(--text-muted);">%s</td>
+				<td style="padding:6px 8px;">
+					<button onclick="unblockIP('%s')" class="btn" style="background:#10b981; color:white; padding:2px 8px; font-size:0.75rem; border:none; border-radius:4px; cursor:pointer;">✅ Desbloquear</button>
+				</td>
+			</tr>`, b.IP, untilStr, b.IP))
+		}
+		blockedSectionHTML.WriteString(`</tbody></table></div>`)
 	}
 
 	qrPNG, _ := qrcode.Encode(pairURL, qrcode.Medium, 256)
@@ -1548,6 +1652,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                             <th style="padding:8px 10px;">Tráfico Relé</th>
                             <th style="padding:8px 10px;">Expiración</th>
                             <th style="padding:8px 10px;">Estado</th>
+                            <th style="padding:8px 10px;">Acción</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -1555,6 +1660,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                     </tbody>
                 </table>
             </div>
+            %s
         </div>
 
         <div class="card">
@@ -1850,6 +1956,56 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 btn.disabled = false;
                 btn.innerText = "🚀 Probar y Activar";
             }
+        async function blockIP(ip) {
+            if (!confirm("¿Deseas bloquear la IP " + ip + " para denegarle el acceso al servidor TURN?")) return;
+            try {
+                const res = await fetch("/api/turn/block", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ ip: ip, action: "block" })
+                });
+                const d = await res.json();
+                if (d.success) {
+                    alert("🚫 IP " + ip + " bloqueada con éxito.");
+                    window.location.reload();
+                }
+            } catch (err) {
+                alert("Error bloqueando IP: " + err.message);
+            }
+        }
+
+        async function unblockIP(ip) {
+            try {
+                const res = await fetch("/api/turn/block", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ ip: ip, action: "unblock" })
+                });
+                const d = await res.json();
+                if (d.success) {
+                    alert("✅ IP " + ip + " desbloqueada.");
+                    window.location.reload();
+                }
+            } catch (err) {
+                alert("Error desbloqueando IP: " + err.message);
+            }
+        }
+
+        async function revokeSession(sessionKey) {
+            if (!confirm("¿Deseas expulsar y cortar esta sesión de vídeo TURN activa?")) return;
+            try {
+                const res = await fetch("/api/turn/revoke", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ session_key: sessionKey })
+                });
+                const d = await res.json();
+                if (d.success) {
+                    window.location.reload();
+                }
+            } catch (err) {
+                alert("Error revocando sesión: " + err.message);
+            }
         }
     </script>
 </body>
@@ -1874,6 +2030,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		activeCount,
 		blockedCount,
 		sessionsRows.String(),
+		blockedSectionHTML.String(),
 		string(configJSONBytes),
 		pairURL,
 	)
