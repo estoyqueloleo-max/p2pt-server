@@ -31,15 +31,17 @@ type IPReputation struct {
 }
 
 type TurnMonitor struct {
-	sessions    map[string]*TurnSession // key: username or relay_addr
-	reputations map[string]*IPReputation
-	mu          sync.RWMutex
+	sessions      map[string]*TurnSession // key: username or relay_addr
+	reputations   map[string]*IPReputation
+	revokedTokens map[string]time.Time // username/token -> expiry time
+	mu            sync.RWMutex
 }
 
 func NewTurnMonitor() *TurnMonitor {
 	tm := &TurnMonitor{
-		sessions:    make(map[string]*TurnSession),
-		reputations: make(map[string]*IPReputation),
+		sessions:      make(map[string]*TurnSession),
+		reputations:   make(map[string]*IPReputation),
+		revokedTokens: make(map[string]time.Time),
 	}
 	tm.startCleanupRoutine()
 	return tm
@@ -102,6 +104,9 @@ func (tm *TurnMonitor) RecordAuthAttempt(username string, srcAddr net.Addr, succ
 	}
 
 	if success {
+		if tm.revokedTokens[username].After(now) {
+			return
+		}
 		rep.SuccessCount++
 		rep.Failures = 0 // reset failure counter on success
 
@@ -218,19 +223,39 @@ func (tm *TurnMonitor) UnblockIP(ip string) {
 	}
 }
 
-// RevokeSession immediately removes an active session
+// IsSessionRevoked returns true if username/token was manually revoked
+func (tm *TurnMonitor) IsSessionRevoked(username string) bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	expiry, revoked := tm.revokedTokens[username]
+	if !revoked {
+		return false
+	}
+	return time.Now().Before(expiry)
+}
+
+// RevokeSession immediately removes an active session and bans its token from renewing
 func (tm *TurnMonitor) RevokeSession(sessionKey string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
+	banDuration := 12 * time.Hour
+	now := time.Now()
+
+	targetUser := sessionKey
+	if parts := strings.Split(sessionKey, "@"); len(parts) == 2 {
+		targetUser = parts[0]
+	}
+
+	tm.revokedTokens[targetUser] = now.Add(banDuration)
+	tm.revokedTokens[sessionKey] = now.Add(banDuration)
+
 	if _, exists := tm.sessions[sessionKey]; exists {
 		delete(tm.sessions, sessionKey)
-		return
 	}
 	for key, s := range tm.sessions {
-		if s.Username == sessionKey || fmt.Sprintf("%s@%s", s.Username, s.ClientIP) == sessionKey {
+		if s.Username == targetUser || s.Username == sessionKey || fmt.Sprintf("%s@%s", s.Username, s.ClientIP) == sessionKey {
 			delete(tm.sessions, key)
-			break
 		}
 	}
 }

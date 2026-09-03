@@ -159,6 +159,21 @@ func (s *SignalingServer) ClientCount() int {
 	return len(s.clients)
 }
 
+func (s *SignalingServer) KickClient(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if client, exists := s.clients[id]; exists {
+		client.mu.Lock()
+		if client.Conn != nil {
+			_ = client.Conn.Close()
+		}
+		client.mu.Unlock()
+		delete(s.clients, id)
+		log.Printf("[PeerJS] ⚡ Cliente expulsado y desconectado: %s", id)
+	}
+}
+
 // HandleWebSocket handles incoming WebSocket connections for PeerJS
 func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
@@ -498,6 +513,10 @@ func main() {
 			log.Printf("[TURN-Auth] Auth request for user: %s, realm: %s from %s", u, r, srcAddr)
 			if turnMonitor.CheckIPBlocked(srcAddr) {
 				log.Printf("[TURN-Auth] IP %s bloqueada temporalmente por intentos fallidos", srcAddr)
+				return nil, false
+			}
+			if turnMonitor.IsSessionRevoked(u) {
+				log.Printf("[TURN-Auth] Sesión %s revocada manualmente, denegando acceso", u)
 				return nil, false
 			}
 
@@ -842,6 +861,16 @@ func main() {
 		}
 		turnMonitor.RevokeSession(payload.SessionKey)
 		log.Printf("[Security] ⚡ Sesión %s revocada manualmente.", payload.SessionKey)
+
+		// Also kick from WebSocket signaling server if client is currently connected
+		parts := strings.Split(payload.SessionKey, "@")
+		user := parts[0]
+		peerID := user
+		if uParts := strings.Split(user, ":"); len(uParts) >= 2 {
+			peerID = uParts[1]
+		}
+		sigServer.KickClient(peerID)
+
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"revoked": payload.SessionKey,
