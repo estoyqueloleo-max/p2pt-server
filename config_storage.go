@@ -24,6 +24,29 @@ func GetEnvConfigPath() string {
 	return "./pingo.env"
 }
 
+// LoadEnvFile reads key-value pairs from a file and sets them in os.Getenv if currently unset
+func LoadEnvFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			k := strings.TrimSpace(parts[0])
+			v := strings.TrimSpace(parts[1])
+			v = strings.Trim(v, `"'`)
+			if os.Getenv(k) == "" {
+				_ = os.Setenv(k, v)
+			}
+		}
+	}
+}
+
 // SaveConfigToEnv persists current configuration to .env format
 func SaveConfigToEnv(cfg *Config) error {
 	targetPath := GetEnvConfigPath()
@@ -48,6 +71,8 @@ TURN_USER=%s
 TURN_PASS=%s
 TURN_REALM=%s
 TURN_STATIC_AUTH_SECRET=%s
+ADMIN_PASSWORD=%s
+ALLOW_WAN_DASHBOARD=%t
 `,
 		cfg.HTTPPort,
 		cfg.TURNPort,
@@ -62,6 +87,8 @@ TURN_STATIC_AUTH_SECRET=%s
 		cfg.Password,
 		cfg.Realm,
 		cfg.AuthSecret,
+		cfg.AdminPassword,
+		cfg.AllowWANDash,
 	)
 
 	err := os.WriteFile(targetPath, []byte(strings.TrimSpace(content)+"\n"), 0644)

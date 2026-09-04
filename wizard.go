@@ -95,6 +95,19 @@ func RunCLIWizard(cfg *Config) {
 		fmt.Println("✅ UPnP habilitado para auto-configuración del router.")
 	}
 
+	// 5. Admin Password for Dashboard
+	fmt.Print("🔹 Paso 6: Contraseña de administración para el Dashboard [deja en blanco para generar una segura]: ")
+	passInput, _ := reader.ReadString('\n')
+	passInput = strings.TrimSpace(passInput)
+	if passInput != "" {
+		cfg.AdminPassword = passInput
+		fmt.Println("✅ Contraseña de administrador configurada.")
+	} else if cfg.AdminPassword == "" {
+		fmt.Println("ℹ️ Se generará una contraseña segura automáticamente al iniciar el servidor.")
+	} else {
+		fmt.Println("ℹ️ Manteniendo la contraseña de administrador actual.")
+	}
+
 	fmt.Println("\n==================================================================")
 	fmt.Println("        🎉 ¡CONFIGURACIÓN COMPLETADA CON ÉXITO!                   ")
 	fmt.Println("==================================================================")
