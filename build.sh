@@ -33,7 +33,7 @@ GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$OUTPUT_DIR
 
 # Generar paquetes APK si nfpm está disponible
 NFPM_BIN=$(which nfpm 2>/dev/null || echo "$HOME/go/bin/nfpm")
-VERSION="${VERSION:-1.2.0}"
+VERSION="${VERSION:-1.3.0}"
 if [ -x "$NFPM_BIN" ] && [ -f "${SCRIPT_DIR}/nfpm.yaml" ]; then
     echo -e "\n📦 Generando paquetes APK para Alpine Linux con nfpm..."
     

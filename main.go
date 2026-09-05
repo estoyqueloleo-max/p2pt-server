@@ -27,6 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/logging"
 	"github.com/pion/turn/v4"
+	"github.com/pion/webrtc/v4"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -263,6 +264,15 @@ type ClientConfigJSON struct {
 		Username   string   `json:"username"`
 		Credential string   `json:"credential"`
 	} `json:"turn"`
+	Broadcast struct {
+		Enabled bool   `json:"enabled"`
+		WHIPURL string `json:"whip_url"`
+		WHEPURL string `json:"whep_url"`
+	} `json:"broadcast"`
+	Capabilities struct {
+		BroadcastRelay      bool `json:"broadcast_relay"`
+		TurnAllowedForMedia bool `json:"turn_allowed_for_media"`
+	} `json:"capabilities"`
 }
 
 func getLocalOutboundIP() string {
@@ -307,6 +317,16 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
 	}
 	clientConfig.Turn.Username = cfg.Username
 	clientConfig.Turn.Credential = cfg.Password
+
+	proto := "http"
+	if cfg.EnableTLS {
+		proto = "https"
+	}
+	clientConfig.Broadcast.Enabled = true
+	clientConfig.Broadcast.WHIPURL = fmt.Sprintf("%s://%s:%d/api/whip", proto, publicHost, cfg.HTTPPort)
+	clientConfig.Broadcast.WHEPURL = fmt.Sprintf("%s://%s:%d/api/whep", proto, publicHost, cfg.HTTPPort)
+	clientConfig.Capabilities.BroadcastRelay = true
+	clientConfig.Capabilities.TurnAllowedForMedia = true
 
 	configJSONBytes, _ := json.MarshalIndent(clientConfig, "", "  ")
 	configBase64 := base64.URLEncoding.EncodeToString([]byte(configJSONBytes))
@@ -606,6 +626,7 @@ func main() {
 
 	// PeerJS endpoints
 	mux.HandleFunc("/peerjs", handleWS)
+	mux.HandleFunc("/peerjs/", handleWS)
 	mux.HandleFunc("/peerjs/peerjs", handleWS)
 	mux.HandleFunc("/peerjs/id", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -772,6 +793,7 @@ func main() {
 		turnURI := fmt.Sprintf("turn:%s:%d?transport=udp", cfg.GetPublicIP(), cfg.TURNPort)
 		stunURI := fmt.Sprintf("stun:%s:%d", cfg.GetPublicIP(), cfg.TURNPort)
 
+		clientCfg, _, _ := generatePairConfig(cfg)
 		resp := map[string]interface{}{
 			"iceServers": []map[string]interface{}{
 				{
@@ -780,9 +802,38 @@ func main() {
 					"credential": turnPass,
 				},
 			},
-			"ttl": ttl,
+			"ttl":          ttl,
+			"capabilities": clientCfg.Capabilities,
+			"broadcast":    clientCfg.Broadcast,
 		}
 		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	broadcastMgr := NewBroadcastManager(2, []webrtc.ICEServer{
+		{
+			URLs: []string{fmt.Sprintf("stun:%s:%d", cfg.GetPublicIP(), cfg.TURNPort)},
+		},
+	})
+	mux.HandleFunc("/api/whip/", broadcastMgr.HandleWHIP)
+	mux.HandleFunc("/api/whep/", broadcastMgr.HandleWHEP)
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		clientCfg, _, pairURL := generatePairConfig(cfg)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":       "ok",
+			"version":      clientCfg.Version,
+			"signaling":    clientCfg.Signaling,
+			"capabilities": clientCfg.Capabilities,
+			"broadcast":    clientCfg.Broadcast,
+			"pair_url":     pairURL,
+		})
 	})
 
 	mux.HandleFunc("/api/turn", func(w http.ResponseWriter, r *http.Request) {
@@ -1075,14 +1126,16 @@ func main() {
 	}
 
 	// 7. Initialize TLS Certificates (Let's Encrypt via DuckDNS DNS-01 or Local/Self-Signed fallback)
-	cert, errTLS := EnsureTLSCertificates(cfg)
-	if errTLS == nil {
-		cfg.EnableTLS = true
-		tlsMu.Lock()
-		currentTLSCert = cert
-		tlsMu.Unlock()
-	} else {
-		log.Printf("[TLS] Advertencia: no se pudo iniciar TLS automático: %v", errTLS)
+	if cfg.EnableTLS {
+		cert, errTLS := EnsureTLSCertificates(cfg)
+		if errTLS == nil {
+			tlsMu.Lock()
+			currentTLSCert = cert
+			tlsMu.Unlock()
+		} else {
+			log.Printf("[TLS] Advertencia: no se pudo iniciar TLS automático: %v", errTLS)
+			cfg.EnableTLS = false
+		}
 	}
 
 	_, configJSON, pairURL := generatePairConfig(cfg)
