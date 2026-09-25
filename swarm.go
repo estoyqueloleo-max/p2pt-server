@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -42,8 +43,12 @@ func NewSwarmAnnouncer(cfg *Config) *SwarmAnnouncer {
 	infoHash := DeriveInfoHash(topic)
 	peerID := fmt.Sprintf("-PI0100-%s", infoHash[:12])
 
+	scheme := "ws"
+	if cfg.EnableTLS {
+		scheme = "wss"
+	}
 	trackers := []string{
-		fmt.Sprintf("ws://127.0.0.1:%d/tracker", cfg.HTTPPort),
+		fmt.Sprintf("%s://127.0.0.1:%d/tracker", scheme, cfg.HTTPPort),
 		"wss://tracker.openwebtorrent.com",
 		"wss://tracker.btorrent.xyz",
 	}
@@ -93,7 +98,10 @@ func (s *SwarmAnnouncer) announceToTracker(trackerURL string) {
 		return
 	}
 
-	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+	}
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
 		// Suppress logs for external public trackers if unreachable in test environments

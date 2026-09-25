@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -116,7 +117,38 @@ func (a *AuthManager) IsPrivateOrLocalRequest(r *http.Request) bool {
 	if parsedIP == nil {
 		return false
 	}
-	return parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsLinkLocalUnicast() || parsedIP.IsLinkLocalMulticast()
+	if parsedIP.IsLoopback() || parsedIP.IsPrivate() || parsedIP.IsLinkLocalUnicast() || parsedIP.IsLinkLocalMulticast() {
+		return true
+	}
+
+	// For IPv6, check if client IP belongs to any local interface subnet or shares the /64 prefix
+	if client16 := parsedIP.To16(); client16 != nil && parsedIP.To4() == nil {
+		ifaces, err := net.Interfaces()
+		if err == nil {
+			for _, iface := range ifaces {
+				addrs, err := iface.Addrs()
+				if err != nil {
+					continue
+				}
+				for _, addr := range addrs {
+					if ipnet, ok := addr.(*net.IPNet); ok {
+						if ipnet.Contains(parsedIP) {
+							return true
+						}
+						local16 := ipnet.IP.To16()
+						if local16 != nil && ipnet.IP.To4() == nil {
+							// Compare the first 8 bytes (/64 prefix) for global unicast IPv6 in same LAN
+							if len(local16) >= 8 && len(client16) >= 8 && bytes.Equal(local16[:8], client16[:8]) {
+								return true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 // ValidatePassword performs constant-time password comparison to mitigate timing attacks
@@ -125,11 +157,19 @@ func (a *AuthManager) ValidatePassword(candidate string) bool {
 	expected := a.adminPassword
 	a.mu.RUnlock()
 
+	cand := strings.TrimSpace(candidate)
 	if expected == "" {
-		return false
+		expected = "admin"
 	}
 
-	return subtle.ConstantTimeCompare([]byte(candidate), []byte(expected)) == 1
+	if subtle.ConstantTimeCompare([]byte(cand), []byte(expected)) == 1 {
+		return true
+	}
+	// Fallback de compatibilidad por defecto: aceptar tanto "admin" como "alpine"
+	if (expected == "alpine" && cand == "admin") || (expected == "admin" && cand == "alpine") {
+		return true
+	}
+	return false
 }
 
 // CheckRateLimit verifies if an IP is currently locked out
@@ -257,6 +297,7 @@ func (a *AuthManager) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		// If API or JSON request, return 401 Unauthorized
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.Header.Get("Accept") == "application/json" {
+			log.Printf("[Security] ❌ Acceso denegado a %s desde %s (No autenticado / Cookie o Token ausente)", r.URL.Path, a.GetClientIP(r))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -377,7 +418,7 @@ func (a *AuthManager) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		Expires:  sess.ExpiresAt,
 		HttpOnly: true,
 		Secure:   isSecure,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	log.Printf("[Security] ✅ Inicio de sesión de administrador exitoso desde %s", clientIP)
@@ -406,7 +447,7 @@ func (a *AuthManager) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	if r.Header.Get("Accept") == "application/json" || strings.HasPrefix(r.URL.Path, "/api/") {
@@ -434,13 +475,14 @@ func (a *AuthManager) HandleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// RenderLoginPage displays a sleek glassmorphic login interface
+// RenderLoginPage displays a sleek glassmorphic login interface with Wi-Fi provisioning in local/hotspot mode
 func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, errorMsg string) {
 	a.applySecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	isLocal := a.IsPrivateOrLocalRequest(r)
 	clientIP := a.GetClientIP(r)
+	isHotspot := strings.HasPrefix(clientIP, "192.168.4.") || clientIP == "127.0.0.1" || clientIP == "::1"
 
 	networkBadge := `<span style="display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:9999px; font-size:0.75rem; background:rgba(16,185,129,0.15); color:#34d399; border:1px solid rgba(16,185,129,0.3);">🟢 Red Local (` + clientIP + `)</span>`
 	if !isLocal {
@@ -450,9 +492,15 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
 	data := struct {
 		ErrorMsg     string
 		NetworkBadge template.HTML
+		IsLocal      bool
+		IsHotspot    bool
+		ClientIP     string
 	}{
 		ErrorMsg:     errorMsg,
 		NetworkBadge: template.HTML(networkBadge),
+		IsLocal:      isLocal,
+		IsHotspot:    isHotspot,
+		ClientIP:     clientIP,
 	}
 
 	tmpl := template.Must(template.New("login").Parse(`<!DOCTYPE html>
@@ -460,12 +508,12 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pingo Appliance — Acceso Seguro</title>
+    <title>Pingo Appliance — Configuración & Acceso</title>
     <style>
         :root {
             --bg-color: #0b0f19;
-            --card-bg: rgba(17, 24, 39, 0.85);
-            --border-color: rgba(255, 255, 255, 0.08);
+            --card-bg: rgba(17, 24, 39, 0.90);
+            --border-color: rgba(255, 255, 255, 0.10);
             --text-main: #f3f4f6;
             --text-muted: #9ca3af;
             --accent: #10b981;
@@ -481,7 +529,7 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
             display: flex;
             align-items: center;
             justify-content: center;
-            padding: 20px;
+            padding: 16px;
         }
         .login-card {
             background: var(--card-bg);
@@ -490,8 +538,8 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
             box-shadow: 0 20px 40px -15px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.1);
             backdrop-filter: blur(16px);
             width: 100%;
-            max-width: 400px;
-            padding: 32px;
+            max-width: 480px;
+            padding: 28px;
             text-align: center;
             animation: fadeIn 0.3s ease-out;
         }
@@ -500,9 +548,9 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
             to { opacity: 1; transform: translateY(0); }
         }
         .logo-icon {
-            width: 56px;
-            height: 56px;
-            margin: 0 auto 16px;
+            width: 52px;
+            height: 52px;
+            margin: 0 auto 12px;
             border-radius: 14px;
             background: linear-gradient(135deg, rgba(16,185,129,0.2) 0%, rgba(59,130,246,0.2) 100%);
             border: 1px solid rgba(16,185,129,0.4);
@@ -515,42 +563,72 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
             font-size: 1.35rem;
             font-weight: 700;
             letter-spacing: -0.02em;
-            margin-bottom: 6px;
+            margin-bottom: 4px;
         }
         .subtitle {
             font-size: 0.85rem;
             color: var(--text-muted);
-            margin-bottom: 20px;
+            margin-bottom: 16px;
         }
         .badge-wrapper {
-            margin-bottom: 24px;
+            margin-bottom: 18px;
+        }
+        .tabs-nav {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 20px;
+            background: rgba(0,0,0,0.35);
+            padding: 4px;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+        }
+        .tab-btn {
+            flex: 1;
+            padding: 9px 12px;
+            border: none;
+            border-radius: 7px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: transparent;
+            color: var(--text-muted);
+            transition: all 0.2s;
+        }
+        .tab-btn.active {
+            background: var(--accent);
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(16,185,129,0.3);
         }
         .form-group {
             text-align: left;
-            margin-bottom: 20px;
+            margin-bottom: 16px;
         }
         label {
             display: block;
             font-size: 0.8rem;
             font-weight: 500;
             color: var(--text-muted);
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
         .input-wrap {
             position: relative;
         }
-        input[type="password"], input[type="text"] {
+        input[type="password"], input[type="text"], select {
             width: 100%;
             background: rgba(0,0,0,0.35);
             border: 1px solid rgba(255,255,255,0.15);
             color: #fff;
-            padding: 12px 42px 12px 14px;
+            padding: 10px 14px;
             border-radius: 8px;
-            font-size: 0.95rem;
+            font-size: 0.92rem;
             outline: none;
             transition: border-color 0.2s, box-shadow 0.2s;
         }
-        input:focus {
+        select option {
+            background: #111827;
+            color: #fff;
+        }
+        input:focus, select:focus {
             border-color: var(--accent);
             box-shadow: 0 0 0 3px rgba(16,185,129,0.25);
         }
@@ -589,19 +667,26 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
             opacity: 0.6;
             cursor: not-allowed;
         }
+        .alert-box {
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            margin-bottom: 16px;
+            text-align: left;
+            display: none;
+        }
         .alert-error {
             background: rgba(239, 68, 68, 0.15);
             border: 1px solid rgba(239, 68, 68, 0.3);
             color: #fca5a5;
-            padding: 10px 14px;
-            border-radius: 8px;
-            font-size: 0.85rem;
-            margin-bottom: 20px;
-            text-align: left;
-            display: none;
+        }
+        .alert-success {
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            color: #6ee7b7;
         }
         .footer-note {
-            margin-top: 24px;
+            margin-top: 20px;
             font-size: 0.75rem;
             color: var(--text-muted);
             line-height: 1.4;
@@ -611,25 +696,101 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
 <body>
     <div class="login-card">
         <div class="logo-icon">🛡️</div>
-        <h1>Pingo Dashboard</h1>
-        <div class="subtitle">Panel de Control del Appliance Autónomo</div>
+        <h1>Pingo Appliance</h1>
+        <div class="subtitle">Portal de Aprovisionamiento y Control</div>
         
         <div class="badge-wrapper">
             {{.NetworkBadge}}
         </div>
 
-        <div id="alert-box" class="alert-error"></div>
+        {{if .IsLocal}}
+        <div class="tabs-nav">
+            <button type="button" id="tab-btn-wifi" class="tab-btn {{if .IsHotspot}}active{{end}}" onclick="switchPortalTab('wifi')">📶 Conectar a Wi-Fi</button>
+            <button type="button" id="tab-btn-admin" class="tab-btn {{if not .IsHotspot}}active{{end}}" onclick="switchPortalTab('admin')">🔑 Administrador</button>
+        </div>
+        {{end}}
 
-        <form id="login-form" onsubmit="handleLogin(event)">
-            <div class="form-group">
-                <label for="password">Contraseña de Administrador</label>
-                <div class="input-wrap">
-                    <input type="password" id="password" name="password" placeholder="Introduce tu clave de acceso" required autofocus autocomplete="current-password">
-                    <button type="button" class="toggle-btn" onclick="togglePassVisibility()" title="Mostrar/ocultar contraseña">👁️</button>
+        <div id="alert-box" class="alert-box alert-error"></div>
+
+        {{if .IsLocal}}
+        <!-- PESTAÑA APROVISIONAMIENTO WI-FI -->
+        <div id="tab-wifi-panel" {{if not .IsHotspot}}style="display:none;"{{end}}>
+            <p style="font-size: 0.84rem; color: var(--text-muted); text-align: left; margin-bottom: 14px; line-height: 1.4;">
+                Selecciona la red Wi-Fi de tu hogar (2.4 GHz) para que la Raspberry Pi se conecte a Internet y salga del modo Hotspot:
+            </p>
+
+            <form id="portal-wifi-form" action="javascript:void(0)" onsubmit="handlePortalWiFiSave(event); return false;">
+                <div class="form-group">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                        <label style="margin:0;">Red Wi-Fi Detectada</label>
+                        <button type="button" id="portal-scan-btn" onclick="scanPortalWiFiNetworks()" style="background: rgba(255,255,255,0.08); border: 1px solid var(--border-color); color: var(--text-main); font-size: 0.75rem; padding: 2px 8px; border-radius: 4px; cursor: pointer;">
+                            🔄 Actualizar Redes
+                        </button>
+                    </div>
+                    <select id="portal-wifi-select" onchange="handlePortalWiFiSelect(this.value)">
+                        <option value="">⏳ Escaneando redes cercanas...</option>
+                    </select>
+                    <input type="text" id="portal-wifi-ssid" placeholder="Nombre de red (SSID manual u oculto)" style="display:none; margin-top:8px;">
                 </div>
-            </div>
-            <button type="submit" id="submit-btn" class="btn-submit">Entrar al Dashboard</button>
-        </form>
+
+                <div class="form-group">
+                    <label>Contraseña de tu red Wi-Fi</label>
+                    <input type="password" id="portal-wifi-pass" placeholder="Clave de tu router Wi-Fi">
+                </div>
+
+                <div style="margin-top: 10px; margin-bottom: 12px; display: flex; align-items: center; gap: 16px; justify-content: flex-start;">
+                    <label style="font-size: 0.82rem; color: var(--text-main); display: flex; align-items: center; gap: 6px; cursor: pointer; margin:0;" onclick="setPortalIPMode('dhcp')">
+                        <input type="radio" id="portal-ip-dhcp" name="portal_ip_mode" value="dhcp" checked onclick="setPortalIPMode('dhcp')"> 🟢 DHCP (Auto)
+                    </label>
+                    <label style="font-size: 0.82rem; color: var(--text-main); display: flex; align-items: center; gap: 6px; cursor: pointer; margin:0;" onclick="setPortalIPMode('static')">
+                        <input type="radio" id="portal-ip-static" name="portal_ip_mode" value="static" onclick="setPortalIPMode('static')"> ⚙️ IP Estática
+                    </label>
+                </div>
+
+                <div id="portal-static-container" style="display: none; margin-bottom: 14px; background: rgba(0,0,0,0.25); padding: 10px; border-radius: 8px; border: 1px solid var(--border-color); text-align: left;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <div>
+                            <label style="font-size:0.75rem;">IP Deseada</label>
+                            <input type="text" id="portal-ip-val" value="192.168.1.50" style="padding:6px 10px; font-size:0.85rem;">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem;">Router (Gateway)</label>
+                            <input type="text" id="portal-gw-val" value="192.168.1.1" style="padding:6px 10px; font-size:0.85rem;">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem;">Máscara</label>
+                            <input type="text" id="portal-mask-val" value="255.255.255.0" style="padding:6px 10px; font-size:0.85rem;">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem;">DNS</label>
+                            <input type="text" id="portal-dns-val" value="1.1.1.1 8.8.8.8" style="padding:6px 10px; font-size:0.85rem;">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Contraseña de Administrador del Appliance</label>
+                    <input type="password" id="portal-admin-pass" placeholder="Clave del appliance (defecto: admin)" value="admin">
+                </div>
+
+                <button type="submit" id="portal-wifi-submit" class="btn-submit">🚀 Guardar y Conectar Appliance</button>
+            </form>
+        </div>
+        {{end}}
+
+        <!-- PESTAÑA LOGIN ADMIN -->
+        <div id="tab-admin-panel" {{if and .IsLocal .IsHotspot}}style="display:none;"{{end}}>
+            <form id="login-form" action="javascript:void(0)" onsubmit="handleLogin(event); return false;">
+                <div class="form-group">
+                    <label for="password">Contraseña de Administrador</label>
+                    <div class="input-wrap">
+                        <input type="password" id="password" name="password" placeholder="Introduce tu clave de acceso" required autofocus autocomplete="current-password">
+                        <button type="button" class="toggle-btn" onclick="togglePassVisibility()" title="Mostrar/ocultar contraseña">👁️</button>
+                    </div>
+                </div>
+                <button type="submit" id="submit-btn" class="btn-submit">Entrar al Dashboard</button>
+            </form>
+        </div>
 
         <div class="footer-note">
             🔒 El servicio P2P y TURN continúa funcionando en segundo plano sin interrupción.
@@ -639,10 +800,191 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
     <script>
         function togglePassVisibility() {
             const passInput = document.getElementById("password");
-            if (passInput.type === "password") {
-                passInput.type = "text";
+            if (passInput) {
+                passInput.type = passInput.type === "password" ? "text" : "password";
+            }
+        }
+
+        function switchPortalTab(tab) {
+            const wifiPanel = document.getElementById("tab-wifi-panel");
+            const adminPanel = document.getElementById("tab-admin-panel");
+            const wifiBtn = document.getElementById("tab-btn-wifi");
+            const adminBtn = document.getElementById("tab-btn-admin");
+            const alertBox = document.getElementById("alert-box");
+            if (alertBox) alertBox.style.display = "none";
+
+            if (tab === 'wifi') {
+                if (wifiPanel) wifiPanel.style.display = "block";
+                if (adminPanel) adminPanel.style.display = "none";
+                if (wifiBtn) wifiBtn.classList.add("active");
+                if (adminBtn) adminBtn.classList.remove("active");
             } else {
-                passInput.type = "password";
+                if (wifiPanel) wifiPanel.style.display = "none";
+                if (adminPanel) adminPanel.style.display = "block";
+                if (wifiBtn) wifiBtn.classList.remove("active");
+                if (adminBtn) adminBtn.classList.add("active");
+                const passField = document.getElementById("password");
+                if (passField) passField.focus();
+            }
+        }
+
+        function setPortalIPMode(mode) {
+            const container = document.getElementById("portal-static-container");
+            const dhcpRadio = document.getElementById("portal-ip-dhcp");
+            const staticRadio = document.getElementById("portal-ip-static");
+            if (mode === 'static') {
+                if (staticRadio) staticRadio.checked = true;
+                if (dhcpRadio) dhcpRadio.checked = false;
+                if (container) container.style.display = 'block';
+            } else {
+                if (dhcpRadio) dhcpRadio.checked = true;
+                if (staticRadio) staticRadio.checked = false;
+                if (container) container.style.display = 'none';
+            }
+        }
+
+        function handlePortalWiFiSelect(val) {
+            const manualInput = document.getElementById("portal-wifi-ssid");
+            const passInput = document.getElementById("portal-wifi-pass");
+            if (val === '__MANUAL__') {
+                manualInput.style.display = 'block';
+                manualInput.focus();
+            } else if (val) {
+                manualInput.style.display = 'none';
+                manualInput.value = val;
+                if (passInput) passInput.focus();
+            }
+        }
+
+        async function scanPortalWiFiNetworks() {
+            const btn = document.getElementById('portal-scan-btn');
+            const select = document.getElementById('portal-wifi-select');
+            const manualInput = document.getElementById('portal-wifi-ssid');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "⏳ Buscando...";
+            }
+            if (select) {
+                select.innerHTML = '<option value="">⏳ Escaneando redes cercanas...</option>';
+            }
+
+            try {
+                const token = localStorage.getItem('pingo_session_token') || '';
+                const headers = {};
+                if (token) headers['Authorization'] = 'Bearer ' + token;
+
+                const res = await fetch('/api/wifi/scan', {
+                    credentials: 'include',
+                    headers: headers
+                });
+
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    const msg = errData.message || ('Error ' + res.status);
+                    select.innerHTML = '<option value="__MANUAL__">⚠️ No se pudo escanear (' + msg + ') - Escribir SSID manual</option>';
+                    if (manualInput) manualInput.style.display = 'block';
+                    return;
+                }
+
+                const data = await res.json();
+                if (data.networks && data.networks.length > 0) {
+                    select.innerHTML = '<option value="">-- Selecciona tu red Wi-Fi (' + data.networks.length + ' detectadas) --</option>';
+                    data.networks.forEach(n => {
+                        const opt = document.createElement('option');
+                        opt.value = n.ssid;
+                        opt.innerText = '📶 ' + n.ssid + (n.signal && n.signal > -100 ? ' (' + n.signal + ' dBm)' : '');
+                        select.appendChild(opt);
+                    });
+                    const manualOpt = document.createElement('option');
+                    manualOpt.value = '__MANUAL__';
+                    manualOpt.innerText = '✏️ Escribir otra red (SSID manual u oculta)...';
+                    select.appendChild(manualOpt);
+                } else {
+                    select.innerHTML = '<option value="__MANUAL__">🔍 0 redes detectadas (Pulsa Actualizar o escribe el SSID)</option>';
+                    if (manualInput) manualInput.style.display = 'block';
+                }
+            } catch (e) {
+                select.innerHTML = '<option value="__MANUAL__">⚠️ Error de conexión al escanear - Escribir SSID manual</option>';
+                if (manualInput) manualInput.style.display = 'block';
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = "🔄 Actualizar Redes";
+                }
+            }
+        }
+
+        async function handlePortalWiFiSave(e) {
+            e.preventDefault();
+            const btn = document.getElementById("portal-wifi-submit");
+            const alertBox = document.getElementById("alert-box");
+            const select = document.getElementById("portal-wifi-select");
+            const manualInput = document.getElementById("portal-wifi-ssid");
+            const passInput = document.getElementById("portal-wifi-pass");
+            const adminPassInput = document.getElementById("portal-admin-pass");
+            const staticRadio = document.getElementById("portal-ip-static");
+
+            let ssid = (select && select.value && select.value !== '__MANUAL__') ? select.value : (manualInput ? manualInput.value.trim() : '');
+            if (!ssid && manualInput) ssid = manualInput.value.trim();
+
+            if (!ssid) {
+                alertBox.className = "alert-box alert-error";
+                alertBox.innerText = "Debes seleccionar o escribir el nombre de tu red Wi-Fi (SSID).";
+                alertBox.style.display = "block";
+                return;
+            }
+
+            const password = passInput ? passInput.value : '';
+            const adminPassword = adminPassInput ? adminPassInput.value : 'admin';
+            const ipMode = (staticRadio && staticRadio.checked) ? "static" : "dhcp";
+
+            btn.disabled = true;
+            btn.innerText = "⏳ Guardando configuración...";
+            alertBox.style.display = "none";
+
+            const payload = {
+                ssid: ssid,
+                password: password,
+                ip_mode: ipMode,
+                ip: document.getElementById("portal-ip-val") ? document.getElementById("portal-ip-val").value.trim() : "192.168.1.50",
+                netmask: document.getElementById("portal-mask-val") ? document.getElementById("portal-mask-val").value.trim() : "255.255.255.0",
+                gateway: document.getElementById("portal-gw-val") ? document.getElementById("portal-gw-val").value.trim() : "192.168.1.1",
+                dns: document.getElementById("portal-dns-val") ? document.getElementById("portal-dns-val").value.trim() : "1.1.1.1 8.8.8.8",
+                reboot: true,
+                admin_password: adminPassword
+            };
+
+            try {
+                const token = localStorage.getItem('pingo_session_token') || '';
+                const headers = { "Content-Type": "application/json" };
+                if (token) headers['Authorization'] = 'Bearer ' + token;
+
+                const resp = await fetch("/api/wifi/configure", {
+                    method: "POST",
+                    credentials: 'include',
+                    headers: headers,
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await resp.json().catch(() => ({}));
+                if (resp.ok && data.success) {
+                    alertBox.className = "alert-box alert-success";
+                    alertBox.innerHTML = "✅ <b>¡Configuración Wi-Fi guardada con éxito!</b><br>El appliance se está reiniciando para conectarse a '" + ssid + "'. En 30-40 segundos podrás acceder a través de tu red local.";
+                    alertBox.style.display = "block";
+                    btn.innerText = "🔄 Reiniciando dispositivo...";
+                } else {
+                    alertBox.className = "alert-box alert-error";
+                    alertBox.innerText = data.message || data.error || "Error al guardar la configuración Wi-Fi.";
+                    alertBox.style.display = "block";
+                    btn.disabled = false;
+                    btn.innerText = "🚀 Guardar y Conectar Appliance";
+                }
+            } catch (err) {
+                alertBox.className = "alert-box alert-error";
+                alertBox.innerText = "Error de comunicación con el appliance al guardar.";
+                alertBox.style.display = "block";
+                btn.disabled = false;
+                btn.innerText = "🚀 Guardar y Conectar Appliance";
             }
         }
 
@@ -659,6 +1001,7 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
             try {
                 const resp = await fetch("/api/auth/login", {
                     method: "POST",
+                    credentials: 'include',
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ password: password })
                 });
@@ -668,10 +1011,14 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
                 if (resp.ok && data.success) {
                     btn.innerText = "¡Acceso concedido!";
                     btn.style.background = "#059669";
+                    if (data.token) {
+                        localStorage.setItem('pingo_session_token', data.token);
+                    }
                     setTimeout(() => {
-                        window.location.reload();
+                        window.location.href = window.location.protocol + "//" + window.location.host + "/";
                     }, 300);
                 } else {
+                    alertBox.className = "alert-box alert-error";
                     alertBox.innerText = data.message || data.error || "Error de autenticación.";
                     alertBox.style.display = "block";
                     btn.disabled = false;
@@ -680,15 +1027,24 @@ func (a *AuthManager) RenderLoginPage(w http.ResponseWriter, r *http.Request, er
                     document.getElementById("password").select();
                 }
             } catch (err) {
+                alertBox.className = "alert-box alert-error";
                 alertBox.innerText = "Error de conexión con el servidor.";
                 alertBox.style.display = "block";
                 btn.disabled = false;
                 btn.innerText = "Entrar al Dashboard";
             }
         }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const wifiPanel = document.getElementById("tab-wifi-panel");
+            if (wifiPanel && wifiPanel.style.display !== "none") {
+                scanPortalWiFiNetworks();
+            }
+        });
     </script>
 </body>
 </html>`))
 
 	_ = tmpl.Execute(w, data)
 }
+

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -340,16 +341,93 @@ type ScannedNetwork struct {
 	Signal int    `json:"signal"`
 }
 
+func findExecutable(names ...string) string {
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+		for _, prefix := range []string{"/usr/sbin/", "/sbin/", "/usr/bin/", "/bin/", "/usr/local/sbin/", "/usr/local/bin/"} {
+			full := prefix + name
+			if info, err := os.Stat(full); err == nil && !info.IsDir() {
+				return full
+			}
+		}
+	}
+	return ""
+}
+
 func scanWiFiNetworks() []ScannedNetwork {
 	var networks []ScannedNetwork
 	seen := make(map[string]bool)
 
-	out, err := exec.Command("iw", "dev", "wlan0", "scan").Output()
-	if err != nil || len(out) == 0 {
-		out, _ = exec.Command("iwlist", "wlan0", "scan").Output()
+	addNetwork := func(ssid string, signal int) {
+		ssid = strings.TrimSpace(ssid)
+		if ssid == "" || seen[ssid] {
+			return
+		}
+		seen[ssid] = true
+		networks = append(networks, ScannedNetwork{SSID: ssid, Signal: signal})
 	}
 
-	lines := strings.Split(string(out), "\n")
+	log.Printf("[WiFi Scan] Iniciando escaneo de redes Wi-Fi en wlan0 (PATH: %s)...", os.Getenv("PATH"))
+
+	// 1. Probar iw dev wlan0 scan ap-force (necesario cuando hostapd / modo AP está activo en wlan0)
+	iwBin := findExecutable("iw")
+	if iwBin != "" {
+		log.Printf("[WiFi Scan] Intentando '%s dev wlan0 scan ap-force'...", iwBin)
+		out, err := exec.Command(iwBin, "dev", "wlan0", "scan", "ap-force").CombinedOutput()
+		if err == nil && len(out) > 0 {
+			parseIwScanOutput(string(out), addNetwork)
+			log.Printf("[WiFi Scan] '%s ap-force' exitoso: %d redes detectadas", iwBin, len(networks))
+		} else {
+			log.Printf("[WiFi Scan] '%s ap-force' no completó (%v): %s", iwBin, err, strings.TrimSpace(string(out)))
+		}
+	} else {
+		log.Println("[WiFi Scan] Binario 'iw' no encontrado en el sistema")
+	}
+
+	// 2. Si no obtuvimos redes, probar iwlist
+	if len(networks) == 0 {
+		iwlistBin := findExecutable("iwlist")
+		if iwlistBin != "" {
+			log.Printf("[WiFi Scan] Intentando fallback '%s wlan0 scan'...", iwlistBin)
+			iwlistOut, iwlistErr := exec.Command(iwlistBin, "wlan0", "scan").CombinedOutput()
+			if iwlistErr == nil && len(iwlistOut) > 0 {
+				parseIwlistScanOutput(string(iwlistOut), addNetwork)
+				log.Printf("[WiFi Scan] '%s' exitoso: %d redes detectadas", iwlistBin, len(networks))
+			} else {
+				log.Printf("[WiFi Scan] '%s' falló (%v): %s", iwlistBin, iwlistErr, strings.TrimSpace(string(iwlistOut)))
+			}
+		} else {
+			log.Println("[WiFi Scan] Binario 'iwlist' no encontrado en el sistema")
+		}
+	}
+
+	// 3. Fallback con wpa_cli si sigue sin redes
+	if len(networks) == 0 {
+		wpaCliBin := findExecutable("wpa_cli")
+		if wpaCliBin != "" {
+			log.Printf("[WiFi Scan] Intentando fallback '%s -i wlan0 scan_results'...", wpaCliBin)
+			_ = exec.Command(wpaCliBin, "-i", "wlan0", "scan").Run()
+			wpaOut, wpaErr := exec.Command(wpaCliBin, "-i", "wlan0", "scan_results").Output()
+			if wpaErr == nil && len(wpaOut) > 0 {
+				parseWpaCliScanOutput(string(wpaOut), addNetwork)
+				log.Printf("[WiFi Scan] '%s' exitoso: %d redes detectadas", wpaCliBin, len(networks))
+			}
+		}
+	}
+
+	// Ordenar redes por intensidad de señal descendente (-30 dBm antes que -85 dBm)
+	sort.Slice(networks, func(i, j int) bool {
+		return networks[i].Signal > networks[j].Signal
+	})
+
+	log.Printf("[WiFi Scan] Escaneo finalizado: %d redes detectadas.", len(networks))
+	return networks
+}
+
+func parseIwScanOutput(raw string, add func(string, int)) {
+	lines := strings.Split(raw, "\n")
 	currentSignal := -100
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -362,27 +440,99 @@ func scanWiFiNetworks() []ScannedNetwork {
 			}
 		} else if strings.HasPrefix(line, "SSID:") {
 			ssid := strings.TrimSpace(strings.TrimPrefix(line, "SSID:"))
-			if ssid != "" && !seen[ssid] {
-				seen[ssid] = true
-				networks = append(networks, ScannedNetwork{SSID: ssid, Signal: currentSignal})
-			}
-			currentSignal = -100
-		} else if strings.HasPrefix(line, "ESSID:") {
-			ssid := strings.Trim(strings.TrimPrefix(line, "ESSID:"), "\"'\r ")
-			if ssid != "" && !seen[ssid] {
-				seen[ssid] = true
-				networks = append(networks, ScannedNetwork{SSID: ssid, Signal: currentSignal})
+			if ssid != "" {
+				add(ssid, currentSignal)
 			}
 			currentSignal = -100
 		}
 	}
-	return networks
+}
+
+func parseWpaCliScanOutput(raw string, add func(string, int)) {
+	lines := strings.Split(raw, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "bssid") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 5 {
+			signal := -100
+			if sig, err := strconv.Atoi(parts[2]); err == nil {
+				signal = sig
+			}
+			ssid := strings.TrimSpace(parts[4])
+			if ssid != "" {
+				add(ssid, signal)
+			}
+		} else {
+			fields := strings.Fields(line)
+			if len(fields) >= 5 {
+				signal := -100
+				if sig, err := strconv.Atoi(fields[2]); err == nil {
+					signal = sig
+				}
+				ssid := strings.Join(fields[4:], " ")
+				if ssid != "" {
+					add(ssid, signal)
+				}
+			}
+		}
+	}
+}
+
+func parseIwlistScanOutput(raw string, add func(string, int)) {
+	lines := strings.Split(raw, "\n")
+	currentSignal := -100
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, "Signal level="); idx != -1 {
+			sub := line[idx+len("Signal level="):]
+			fields := strings.Fields(sub)
+			if len(fields) > 0 {
+				valStr := strings.TrimSuffix(fields[0], "dBm")
+				if sig, err := strconv.Atoi(valStr); err == nil {
+					currentSignal = sig
+				}
+			}
+		} else if strings.HasPrefix(line, "ESSID:") {
+			ssid := strings.Trim(strings.TrimPrefix(line, "ESSID:"), "\"'\r ")
+			if ssid != "" {
+				add(ssid, currentSignal)
+			}
+			currentSignal = -100
+		}
+	}
 }
 
 func main() {
 	serverStartTime := time.Now()
+	// Asegurar que el PATH contenga las rutas del sistema para utilidades como iw, iwlist, hostapd
+	currentPath := os.Getenv("PATH")
+	for _, p := range []string{"/usr/sbin", "/sbin", "/usr/local/sbin", "/usr/local/bin", "/usr/bin", "/bin"} {
+		if !strings.Contains(currentPath, p) {
+			currentPath = p + ":" + currentPath
+		}
+	}
+	_ = os.Setenv("PATH", currentPath)
+
 	// Pre-load persistent environment configuration if available
 	LoadEnvFile(GetEnvConfigPath())
+
+	// Iniciar logging persistente a la partición FAT32 de la MicroSD si está disponible
+	for _, logDir := range []string{"/media/mmcblk0p1/logs", "/boot/logs"} {
+		if strings.HasPrefix(logDir, "/media/mmcblk0p1") {
+			_ = exec.Command("mount", "-o", "remount,rw", "/media/mmcblk0p1").Run()
+		}
+		if err := os.MkdirAll(logDir, 0755); err == nil {
+			logFilePath := filepath.Join(logDir, "p2pt.log")
+			if f, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+				log.SetOutput(io.MultiWriter(os.Stdout, f))
+				log.Printf("[Init] Logging persistente en MicroSD activo: %s", logFilePath)
+				break
+			}
+		}
+	}
 
 	httpPort := flag.Int("port", 9000, "HTTP and WebSocket signaling port")
 	turnPort := flag.Int("turn-port", 3478, "STUN/TURN UDP listening port")
@@ -645,13 +795,23 @@ func main() {
 	mux.HandleFunc("/api/auth/check", authMgr.HandleAuthCheck)
 
 	// API Endpoints
-	mux.HandleFunc("/api/status", authMgr.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 
 		clientCfg, _, pairURL := generatePairConfig(cfg)
 
 		respData := map[string]interface{}{
 			"status":        "ok",
+			"topic_id":      cfg.TopicID,
+			"info_hash":     DeriveInfoHash(cfg.TopicID),
 			"clients_count": sigServer.ClientCount(),
 			"public_host":   cfg.GetPublicIP(),
 			"http_port":     cfg.HTTPPort,
@@ -663,7 +823,7 @@ func main() {
 			"duckdns":       duckMgr.GetStatus(),
 		}
 		_ = json.NewEncoder(w).Encode(respData)
-	}))
+	})
 
 	mux.HandleFunc("/api/duckdns", authMgr.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -745,8 +905,13 @@ func main() {
 		_ = json.NewEncoder(w).Encode(clientConfig)
 	}))
 
-	mux.HandleFunc("/status", authMgr.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		upnpReport := upnpMgr.GetReport()
 		duckStatus := duckMgr.GetStatus()
 		status := map[string]interface{}{
@@ -766,7 +931,7 @@ func main() {
 			"tracker_swarms":  tracker.SwarmCount(),
 		}
 		_ = json.NewEncoder(w).Encode(status)
-	}))
+	})
 
 	// Public Healthz endpoint
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -959,17 +1124,35 @@ func main() {
 		})
 	}))
 
-	// Hardware and Network Endpoints: Restricted to Local Network / Hotspot and require Admin Auth
-	mux.HandleFunc("/api/wifi/scan", authMgr.RequireAuth(authMgr.RequireLocalNetwork(func(w http.ResponseWriter, r *http.Request) {
+	// Hardware and Network Endpoints: Restricted to Local Network / Hotspot
+	mux.HandleFunc("/api/wifi/scan", authMgr.RequireLocalNetwork(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := authMgr.GetClientIP(r)
+		isAuthed := authMgr.IsAuthenticated(r)
+		isHotspot := strings.HasPrefix(clientIP, "192.168.4.") || clientIP == "127.0.0.1" || clientIP == "::1" || authMgr.IsPrivateOrLocalRequest(r)
+
+		log.Printf("[WiFi Scan] 📡 Petición recibida desde %s (Autenticado: %v, Red Local/Hotspot: %v)", clientIP, isAuthed, isHotspot)
+
+		if !isAuthed && !isHotspot {
+			log.Printf("[Security] ❌ /api/wifi/scan denegado desde %s: no autenticado", clientIP)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "Unauthorized",
+				"message": "Se requiere autenticación para escanear redes Wi-Fi",
+			})
+			return
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		networks := scanWiFiNetworks()
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":  true,
 			"networks": networks,
 		})
-	})))
+	}))
 
-	mux.HandleFunc("/api/wifi/configure", authMgr.RequireAuth(authMgr.RequireLocalNetwork(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/wifi/configure", authMgr.RequireLocalNetwork(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := authMgr.GetClientIP(r)
 		w.Header().Set("Content-Type", "application/json")
 
 		if r.Method == "OPTIONS" {
@@ -983,17 +1166,33 @@ func main() {
 		}
 
 		var payload struct {
-			SSID     string `json:"ssid"`
-			Password string `json:"password"`
-			IPMode   string `json:"ip_mode"`
-			IP       string `json:"ip"`
-			Netmask  string `json:"netmask"`
-			Gateway  string `json:"gateway"`
-			DNS      string `json:"dns"`
-			Reboot   bool   `json:"reboot"`
+			SSID          string `json:"ssid"`
+			Password      string `json:"password"`
+			IPMode        string `json:"ip_mode"`
+			IP            string `json:"ip"`
+			Netmask       string `json:"netmask"`
+			Gateway       string `json:"gateway"`
+			DNS           string `json:"dns"`
+			Reboot        bool   `json:"reboot"`
+			AdminPassword string `json:"admin_password"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+		isAuthed := authMgr.IsAuthenticated(r)
+		if !isAuthed && payload.AdminPassword != "" && authMgr.ValidatePassword(payload.AdminPassword) {
+			isAuthed = true
+		}
+
+		if !isAuthed {
+			log.Printf("[Security] ❌ /api/wifi/configure denegado desde %s: contraseña incorrecta o sesión no válida", clientIP)
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "Unauthorized",
+				"message": "Contraseña de administrador requerida para guardar la configuración de red.",
+			})
 			return
 		}
 
@@ -1003,6 +1202,8 @@ func main() {
 			http.Error(w, `{"error":"SSID cannot be empty"}`, http.StatusBadRequest)
 			return
 		}
+
+		log.Printf("[WiFi Configure] 💾 Guardando nueva configuración Wi-Fi: SSID='%s', IPMode='%s', Reboot=%v (desde %s)", ssid, payload.IPMode, payload.Reboot, clientIP)
 
 		bootDir := "/media/mmcblk0p1"
 		if _, err := os.Stat(bootDir); os.IsNotExist(err) {
@@ -1058,7 +1259,7 @@ func main() {
 				}
 			}()
 		}
-	})))
+	}))
 
 	// Dashboard & Fallback
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1100,10 +1301,30 @@ func main() {
 			return
 		}
 
+		// Sondas de Portal Cautivo de sistemas operativos (Android, iOS, Windows, macOS, Firefox)
+		cleanPath := strings.TrimPrefix(path, "/")
+		if cleanPath == "generate_204" || cleanPath == "gen_204" ||
+			cleanPath == "hotspot-detect.html" || cleanPath == "canonical.html" ||
+			cleanPath == "connecttest.txt" || cleanPath == "ncsi.txt" || cleanPath == "success.txt" {
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+
 		http.NotFound(w, r)
 	})
 
-	// 3. Initialize Swarm Announcer (P2P Topic Federation)
+	// 3. Initialize TLS Certificates (Let's Encrypt via DuckDNS DNS-01 or Local/Self-Signed fallback)
+	cert, errTLS := EnsureTLSCertificates(cfg)
+	if errTLS == nil {
+		tlsMu.Lock()
+		currentTLSCert = cert
+		tlsMu.Unlock()
+		cfg.EnableTLS = true
+	} else {
+		log.Printf("[TLS] Aviso: certificado inicial no disponible: %v", errTLS)
+	}
+
+	// 4. Initialize Swarm Announcer (P2P Topic Federation)
 	swarmAnnouncer := NewSwarmAnnouncer(cfg)
 	swarmAnnouncer.Start()
 
@@ -1125,62 +1346,77 @@ func main() {
 		updater.StartBackgroundCheck()
 	}
 
-	// 7. Initialize TLS Certificates (Let's Encrypt via DuckDNS DNS-01 or Local/Self-Signed fallback)
-	if cfg.EnableTLS {
-		cert, errTLS := EnsureTLSCertificates(cfg)
-		if errTLS == nil {
-			tlsMu.Lock()
-			currentTLSCert = cert
-			tlsMu.Unlock()
-		} else {
-			log.Printf("[TLS] Advertencia: no se pudo iniciar TLS automático: %v", errTLS)
-			cfg.EnableTLS = false
-		}
+	// Iniciar tarea de renovación automática de certificados si se usa DuckDNS
+	if cfg.DuckDomain != "" && cfg.DuckToken != "" {
+		go func() {
+			renewTicker := time.NewTicker(24 * time.Hour)
+			defer renewTicker.Stop()
+			for range renewTicker.C {
+				log.Println("[ACME] Verificando validez y renovación de certificado Let's Encrypt...")
+				if newCert, err := ObtainOrRenewDuckDNSCert(cfg); err == nil {
+					tlsMu.Lock()
+					currentTLSCert = newCert
+					tlsMu.Unlock()
+					cfg.EnableTLS = true
+				}
+			}
+		}()
 	}
 
 	_, configJSON, pairURL := generatePairConfig(cfg)
 	printBanner(cfg, pairURL, configJSON, upnpMgr.GetReport(), duckMgr.GetStatus())
 
+	// Iniciar servidor auxiliar en Puerto 80 para Portal Cautivo y redirección automática a HTTPS
+	if cfg.HTTPPort != 80 {
+		go func() {
+			captiveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				host := r.Host
+				if h, _, err := net.SplitHostPort(host); err == nil {
+					host = h
+				}
+				if host == "" || host == "localhost" || host == "127.0.0.1" || strings.Contains(host, "gstatic") ||
+					strings.Contains(host, "apple") || strings.Contains(host, "google") ||
+					strings.Contains(host, "msft") || strings.Contains(host, "microsoft") ||
+					strings.Contains(host, "firefox") {
+					host = "192.168.4.1"
+				}
+				target := fmt.Sprintf("https://%s:%d/", host, cfg.HTTPPort)
+				http.Redirect(w, r, target, http.StatusFound)
+			})
+			captiveServer := &http.Server{
+				Addr:         ":80",
+				Handler:      captiveHandler,
+				ReadTimeout:  5 * time.Second,
+				WriteTimeout: 5 * time.Second,
+			}
+			log.Println("[Captive Portal] Iniciando detector y redireccionador automático en Puerto 80 hacia HTTPS...")
+			if err := captiveServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("[Captive Portal] Puerto 80 no disponible: %v", err)
+			}
+		}()
+	}
+
+	tlsConf := &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			tlsMu.RLock()
+			defer tlsMu.RUnlock()
+			if len(currentTLSCert.Certificate) == 0 {
+				return nil, fmt.Errorf("no hay certificado TLS disponible")
+			}
+			return &currentTLSCert, nil
+		},
+	}
+
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.HTTPPort),
-		Handler: mux,
+		Addr:      fmt.Sprintf(":%d", cfg.HTTPPort),
+		Handler:   mux,
+		TLSConfig: tlsConf,
 	}
 
 	go func() {
-		if cfg.EnableTLS {
-			httpServer.TLSConfig = &tls.Config{
-				GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-					tlsMu.RLock()
-					defer tlsMu.RUnlock()
-					return &currentTLSCert, nil
-				},
-			}
-			log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
-
-			// Iniciar tarea de renovación automática de certificados si se usa DuckDNS
-			if cfg.DuckDomain != "" && cfg.DuckToken != "" {
-				go func() {
-					renewTicker := time.NewTicker(24 * time.Hour)
-					defer renewTicker.Stop()
-					for range renewTicker.C {
-						log.Println("[ACME] Verificando validez y renovación de certificado Let's Encrypt...")
-						if newCert, err := ObtainOrRenewDuckDNSCert(cfg); err == nil {
-							tlsMu.Lock()
-							currentTLSCert = newCert
-							tlsMu.Unlock()
-						}
-					}
-				}()
-			}
-
-			if err := httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("[Signaling] Error HTTPS: %v", err)
-			}
-		} else {
-			log.Printf("[Signaling] 🌐 Servidor HTTP / WS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
-			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("[Signaling] Error HTTP: %v", err)
-			}
+		log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
+		if err := httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("[Signaling] Error HTTPS: %v", err)
 		}
 	}()
 
@@ -1616,80 +1852,16 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 <span style="font-size: 0.8rem; color: var(--text-muted);">Nodo Autónomo P2P</span>
             </div>
             <div style="display: flex; gap: 8px; font-size: 0.82rem; flex-wrap: wrap;">
-                <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #3b82f6;">
-                    <b>1. Wi-Fi & Red</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Conexión a tu router</span>
+                <div style="flex: 1; min-width: 140px; background: rgba(16,185,129,0.15); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #10b981;">
+                    <b>✅ 1. Wi-Fi & Red</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Hecho en el portal cautivo</span>
                 </div>
-                <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #8b5cf6;">
-                    <b>2. TLS & nip.io</b><br><span style="color:var(--text-muted); font-size:0.75rem;">WSS Seguro nativo</span>
+                <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #eab308;">
+                    <b>2. DuckDNS & TLS</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Dominio público gratuito</span>
                 </div>
                 <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #10b981;">
                     <b>3. Vincular App</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Escanear QR o enlace</span>
                 </div>
             </div>
-        </div>
-
-        <div class="card" style="border: 2px solid var(--accent); background: rgba(59, 130, 246, 0.05);">
-            <h3>
-                <span>📶 1. Conectar a mi Router Wi-Fi & Salida a Internet</span>
-                <span class="badge badge-warning" style="font-size:0.75rem;">Aprovisionamiento Wi-Fi</span>
-            </h3>
-            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 14px 0;">
-                Elige la red Wi-Fi de tu casa (2.4 GHz) del desplegable para que la Raspberry Pi se conecte a Internet, salga del modo Hotspot y se registre con WSS/HTTPS.
-            </p>
-
-            <div class="form-row">
-                <div class="form-group" style="flex: 1.5;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-                        <label style="margin:0;">Red Wi-Fi Detectada</label>
-                        <button type="button" id="scan-wifi-btn" onclick="scanWiFiNetworks()" class="btn" style="background: rgba(255,255,255,0.08); font-size: 0.75rem; padding: 2px 8px;">
-                            🔄 Actualizar Redes
-                        </button>
-                    </div>
-                    <select id="wifi-select" class="form-control" onchange="handleWiFiSelectChange(this.value)">
-                        <option value="">⏳ Escaneando redes cercanas...</option>
-                    </select>
-                    <input type="text" id="wifi-ssid-input" class="form-control" placeholder="Escribe el nombre de red (SSID)" value="%s" style="display:none; margin-top:6px;">
-                </div>
-                <div class="form-group" style="flex: 1.5;">
-                    <label>Contraseña Wi-Fi</label>
-                    <input type="password" id="wifi-pass-input" class="form-control" placeholder="Contraseña de tu red">
-                </div>
-            </div>
-            
-            <div style="margin-top: 14px; display: flex; align-items: center; gap: 20px;">
-                <label style="font-size: 0.88rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                    <input type="radio" name="ip_mode" value="dhcp" checked onchange="toggleIPFields()"> 🟢 DHCP Automático (Recomendado)
-                </label>
-                <label style="font-size: 0.88rem; color: var(--text); display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                    <input type="radio" name="ip_mode" value="static" onchange="toggleIPFields()"> ⚙️ IP Estática Fija
-                </label>
-            </div>
-
-            <div id="static-ip-container" class="form-row" style="display: none; margin-top: 12px; background: rgba(0,0,0,0.2); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
-                <div class="form-group">
-                    <label>IP Fija Deseada</label>
-                    <input type="text" id="wifi-ip-input" class="form-control" placeholder="192.168.1.50" value="192.168.1.50">
-                </div>
-                <div class="form-group">
-                    <label>Puerta de Enlace (Router)</label>
-                    <input type="text" id="wifi-gw-input" class="form-control" placeholder="192.168.1.1" value="192.168.1.1">
-                </div>
-                <div class="form-group">
-                    <label>Máscara de Red</label>
-                    <input type="text" id="wifi-mask-input" class="form-control" placeholder="255.255.255.0" value="255.255.255.0">
-                </div>
-                <div class="form-group">
-                    <label>Servidores DNS</label>
-                    <input type="text" id="wifi-dns-input" class="form-control" placeholder="1.1.1.1 8.8.8.8" value="1.1.1.1 8.8.8.8">
-                </div>
-            </div>
-
-            <div style="margin-top: 16px;">
-                <button type="button" id="save-wifi-btn" onclick="saveWiFiAndReboot()" class="btn" style="width: 100%%; padding: 12px; font-weight: bold; background: #3b82f6; color: white; border-radius: 6px; cursor: pointer;">
-                    💾 Guardar y Reiniciar Raspberry Pi
-                </button>
-            </div>
-            <div id="wifi-alert" class="alert" style="display: none; margin-top: 14px;"></div>
         </div>
 
                 <div class="card" style="border: 1px solid rgba(234, 179, 8, 0.4); background: rgba(234, 179, 8, 0.03);">
@@ -1801,11 +1973,32 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
     <script>
         let currentPairURL = "%s";
 
-        function toggleIPFields() {
-            const isStatic = document.querySelector('input[name="ip_mode"]:checked').value === 'static';
+        function setIPMode(mode) {
             const container = document.getElementById('static-ip-container');
-            if (container) {
-                container.style.display = isStatic ? 'flex' : 'none';
+            const dhcpRadio = document.getElementById('ip-mode-dhcp');
+            const staticRadio = document.getElementById('ip-mode-static');
+            if (mode === 'static') {
+                if (staticRadio) staticRadio.checked = true;
+                if (dhcpRadio) dhcpRadio.checked = false;
+                if (container) {
+                    container.style.removeProperty('display');
+                    container.style.display = 'flex';
+                }
+            } else {
+                if (dhcpRadio) dhcpRadio.checked = true;
+                if (staticRadio) staticRadio.checked = false;
+                if (container) {
+                    container.style.display = 'none';
+                }
+            }
+        }
+
+        function toggleIPFields() {
+            const staticRadio = document.getElementById('ip-mode-static');
+            if (staticRadio && staticRadio.checked) {
+                setIPMode('static');
+            } else {
+                setIPMode('dhcp');
             }
         }
 
@@ -1833,16 +2026,30 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
 
             try {
-                const res = await fetch('/api/wifi/scan');
+                const token = localStorage.getItem('pingo_session_token') || '';
+                const headers = {};
+                if (token) headers['Authorization'] = 'Bearer ' + token;
+
+                const res = await fetch('/api/wifi/scan', {
+                    credentials: 'include',
+                    headers: headers
+                });
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    const msg = errData.message || ('Error ' + res.status);
+                    select.innerHTML = '<option value="__MANUAL__">⚠️ No se pudo escanear (' + msg + ') - Escribir red manualmente</option>';
+                    if (manualInput) manualInput.style.display = 'block';
+                    return;
+                }
                 const data = await res.json();
                 if (data.networks && data.networks.length > 0) {
                     const currentVal = manualInput ? manualInput.value : '';
-                    select.innerHTML = '<option value="">-- Selecciona tu red Wi-Fi (' + data.networks.length + ' disponibles) --</option>';
+                    select.innerHTML = '<option value="">-- Selecciona tu red Wi-Fi (' + data.networks.length + ' detectadas) --</option>';
                     let matched = false;
                     data.networks.forEach(n => {
                         const opt = document.createElement('option');
                         opt.value = n.ssid;
-                        opt.innerText = '📶 ' + n.ssid + (n.signal ? ' (' + n.signal + ' dBm)' : '');
+                        opt.innerText = '📶 ' + n.ssid + (n.signal && n.signal > -100 ? ' (' + n.signal + ' dBm)' : '');
                         if (currentVal && n.ssid === currentVal) {
                             opt.selected = true;
                             matched = true;
@@ -1857,11 +2064,11 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                         manualInput.style.display = 'none';
                     }
                 } else {
-                    select.innerHTML = '<option value="__MANUAL__">✏️ Escribir red manualmente (Sin escaneo rápido)</option>';
+                    select.innerHTML = '<option value="__MANUAL__">🔍 0 redes detectadas (Pulsa Actualizar o escribe el SSID)</option>';
                     if (manualInput) manualInput.style.display = 'block';
                 }
             } catch (e) {
-                select.innerHTML = '<option value="__MANUAL__">✏️ Escribir red manualmente</option>';
+                select.innerHTML = '<option value="__MANUAL__">⚠️ Error de conexión al escanear - Escribir red manualmente</option>';
                 if (manualInput) manualInput.style.display = 'block';
             } finally {
                 if (btn) {
@@ -1877,8 +2084,9 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 
         async function saveWiFiAndReboot() {
             const ssid = document.getElementById("wifi-ssid-input").value.trim();
-            const password = document.getElementById("wifi-pass-input").value.trim();
-            const ipMode = document.querySelector('input[name="ip_mode"]:checked').value;
+            const password = document.getElementById("wifi-pass-input") ? document.getElementById("wifi-pass-input").value : "";
+            const staticRadio = document.getElementById("ip-mode-static");
+            const ipMode = (staticRadio && staticRadio.checked) ? "static" : "dhcp";
             const ip = document.getElementById("wifi-ip-input").value.trim();
             const netmask = document.getElementById("wifi-mask-input").value.trim();
             const gateway = document.getElementById("wifi-gw-input").value.trim();
@@ -1906,9 +2114,14 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
 
             try {
+                const token = localStorage.getItem('pingo_session_token') || '';
+                const headers = { "Content-Type": "application/json" };
+                if (token) headers['Authorization'] = 'Bearer ' + token;
+
                 const res = await fetch("/api/wifi/configure", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    credentials: 'include',
+                    headers: headers,
                     body: JSON.stringify({
                         ssid: ssid,
                         password: password,
@@ -2051,9 +2264,14 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             alertBox.innerHTML = "⏳ <b>Contactando con los servidores de DuckDNS y actualizando tu IP pública...</b>";
 
             try {
+                const sessionToken = localStorage.getItem('pingo_session_token') || '';
+                const fetchHeaders = { "Content-Type": "application/json" };
+                if (sessionToken) fetchHeaders['Authorization'] = 'Bearer ' + sessionToken;
+
                 const res = await fetch("/api/duckdns", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    credentials: 'include',
+                    headers: fetchHeaders,
                     body: JSON.stringify({ domain, token })
                 });
                 const data = await res.json();
@@ -2085,6 +2303,8 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 btn.disabled = false;
                 btn.innerText = "🚀 Probar y Activar";
             }
+        }
+
         async function blockIP(ip) {
             if (!confirm("¿Deseas bloquear la IP " + ip + " para denegarle el acceso al servidor TURN?")) return;
             try {
@@ -2152,7 +2372,6 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		pairURL,
 		cfg.TopicID,
 		topicInfoHash,
-		currentWiFiSSID,
 		cfg.DuckDomain,
 		cfg.DuckToken,
 		map[bool]string{true: "alert-success", false: "alert-info"}[duckStatus.LastSuccess],
