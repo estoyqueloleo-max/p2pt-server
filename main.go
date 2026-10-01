@@ -55,6 +55,11 @@ type Config struct {
 	AppPublicURL   string
 	AdminPassword  string
 	AllowWANDash   bool
+	EnableGit      bool
+	GitDir         string
+	GitRepo        string
+	EnableMastodon bool
+	MastodonTarget string
 	mu             sync.RWMutex
 }
 
@@ -274,6 +279,17 @@ type ClientConfigJSON struct {
 		BroadcastRelay      bool `json:"broadcast_relay"`
 		TurnAllowedForMedia bool `json:"turn_allowed_for_media"`
 	} `json:"capabilities"`
+	Git struct {
+		Enabled  bool   `json:"enabled"`
+		URL      string `json:"url"`
+		Username string `json:"username,omitempty"`
+		Token    string `json:"token,omitempty"`
+	} `json:"git,omitempty"`
+	Mastodon struct {
+		Enabled bool   `json:"enabled"`
+		Domain  string `json:"domain,omitempty"`
+		URL     string `json:"url,omitempty"`
+	} `json:"mastodon,omitempty"`
 }
 
 func getLocalOutboundIP() string {
@@ -328,6 +344,34 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
 	clientConfig.Broadcast.WHEPURL = fmt.Sprintf("%s://%s:%d/api/whep", proto, publicHost, cfg.HTTPPort)
 	clientConfig.Capabilities.BroadcastRelay = true
 	clientConfig.Capabilities.TurnAllowedForMedia = true
+
+	if cfg.EnableGit {
+		clientConfig.Git.Enabled = true
+		gitProto := "http"
+		if cfg.EnableTLS {
+			gitProto = "https"
+		}
+		repoName := cfg.GitRepo
+		if repoName == "" {
+			repoName = "routes"
+		}
+		if !strings.HasSuffix(repoName, ".git") {
+			repoName += ".git"
+		}
+		clientConfig.Git.URL = fmt.Sprintf("%s://%s:%d/git/%s/%s", gitProto, publicHost, cfg.HTTPPort, cfg.Username, repoName)
+		clientConfig.Git.Username = cfg.Username
+		clientConfig.Git.Token = cfg.Password
+	}
+
+	if cfg.EnableMastodon {
+		clientConfig.Mastodon.Enabled = true
+		clientConfig.Mastodon.Domain = publicHost
+		mProto := "http"
+		if cfg.EnableTLS {
+			mProto = "https"
+		}
+		clientConfig.Mastodon.URL = fmt.Sprintf("%s://%s", mProto, publicHost)
+	}
 
 	configJSONBytes, _ := json.MarshalIndent(clientConfig, "", "  ")
 	configBase64 := base64.URLEncoding.EncodeToString([]byte(configJSONBytes))
@@ -558,6 +602,12 @@ func main() {
 	enableAutoUpdate := flag.Bool("auto-update", false, "Enable background auto-updates from GitHub Releases")
 	adminPassFlag := flag.String("admin-pass", "", "Admin password for Dashboard & Management APIs")
 	allowWANDashFlag := flag.Bool("allow-wan-dashboard", true, "Allow Dashboard access from WAN/Internet")
+	enableGit := flag.Bool("git", true, "Enable embedded Smart HTTP Git server")
+	noGit := flag.Bool("no-git", false, "Disable embedded Smart HTTP Git server")
+	gitDir := flag.String("git-dir", "", "Directory for hosted Git repositories (default: /var/lib/p2pt/repos or ./data/repos)")
+	gitRepo := flag.String("git-repo", "routes", "Default hosted repository name (e.g. 'routes' or 'data')")
+	enableMastodon := flag.Bool("mastodon", false, "Enable GoToSocial ActivityPub / Mastodon reverse proxy")
+	mastodonTarget := flag.String("mastodon-target", "http://127.0.0.1:8080", "Target address for GoToSocial backend")
 
 	flag.Parse()
 
@@ -605,6 +655,24 @@ func main() {
 	if envWANDash := os.Getenv("ALLOW_WAN_DASHBOARD"); envWANDash == "false" || envWANDash == "0" {
 		*allowWANDashFlag = false
 	}
+	if envGit := os.Getenv("ENABLE_GIT"); envGit == "false" || envGit == "0" {
+		*enableGit = false
+	}
+	if *noGit {
+		*enableGit = false
+	}
+	if envGitDir := os.Getenv("GIT_DIR"); envGitDir != "" {
+		*gitDir = envGitDir
+	}
+	if envGitRepo := os.Getenv("GIT_REPO"); envGitRepo != "" {
+		*gitRepo = envGitRepo
+	}
+	if envMastodon := os.Getenv("ENABLE_MASTODON"); envMastodon == "true" || envMastodon == "1" {
+		*enableMastodon = true
+	}
+	if envMastodonTarget := os.Getenv("MASTODON_TARGET"); envMastodonTarget != "" {
+		*mastodonTarget = envMastodonTarget
+	}
 
 	cfg := &Config{
 		HTTPPort:         *httpPort,
@@ -628,6 +696,11 @@ func main() {
 		AppPublicURL:     *appURL,
 		AdminPassword:    *adminPassFlag,
 		AllowWANDash:     *allowWANDashFlag,
+		EnableGit:        *enableGit,
+		GitDir:           *gitDir,
+		GitRepo:          *gitRepo,
+		EnableMastodon:   *enableMastodon,
+		MastodonTarget:   *mastodonTarget,
 	}
 
 	// Interactive Wizard if requested
@@ -794,6 +867,49 @@ func main() {
 	mux.HandleFunc("/api/auth/logout", authMgr.HandleLogout)
 	mux.HandleFunc("/api/auth/check", authMgr.HandleAuthCheck)
 
+	// Git Smart HTTP Server
+	var gitServer *GitServer
+	if cfg.EnableGit {
+		var err error
+		gitServer, err = NewGitServer(cfg, authMgr)
+		if err != nil {
+			log.Printf("[GitServer] ⚠️ Advertencia al iniciar servidor Git: %v (Git deshabilitado)", err)
+		} else {
+			mux.HandleFunc("/git/", gitServer.ServeHTTP)
+			mux.HandleFunc("/git", gitServer.ServeHTTP)
+			mux.HandleFunc("/api/git/repos", gitServer.HandleListRepos)
+			log.Printf("[GitServer] 🚀 Smart HTTP Git activo en /git/:user/:repo.git")
+		}
+	}
+
+	// GoToSocial ActivityPub / Mastodon Manager
+	var gtsMgr *GoToSocialManager
+	if cfg.EnableMastodon {
+		var err error
+		gtsMgr, err = NewGoToSocialManager(cfg)
+		if err != nil {
+			log.Printf("[GoToSocial] ⚠️ Error inicializando proxy GoToSocial: %v", err)
+		} else {
+			for _, confPath := range []string{"/etc/gotosocial/config.yaml", "./data/gotosocial/config.yaml"} {
+				_ = EnsureGoToSocialConfigFile(cfg, confPath)
+			}
+			mux.HandleFunc("/api/mastodon/status", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				_ = json.NewEncoder(w).Encode(gtsMgr.GetStatus(r.Context()))
+			})
+			mux.HandleFunc("/.well-known/", gtsMgr.ServeHTTP)
+			mux.HandleFunc("/api/v1/", gtsMgr.ServeHTTP)
+			mux.HandleFunc("/api/v2/", gtsMgr.ServeHTTP)
+			mux.HandleFunc("/oauth/", gtsMgr.ServeHTTP)
+			mux.HandleFunc("/users/", gtsMgr.ServeHTTP)
+			mux.HandleFunc("/nodeinfo/", gtsMgr.ServeHTTP)
+			mux.HandleFunc("/inbox", gtsMgr.ServeHTTP)
+			mux.HandleFunc("/outbox", gtsMgr.ServeHTTP)
+			log.Printf("[GoToSocial] 🐘 Reverse proxy Mastodon/ActivityPub activo hacia %s", cfg.MastodonTarget)
+		}
+	}
+
 	// API Endpoints
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -821,6 +937,12 @@ func main() {
 			"config":        clientCfg,
 			"upnp":          upnpMgr.GetReport(),
 			"duckdns":       duckMgr.GetStatus(),
+			"mastodon": func() interface{} {
+				if gtsMgr != nil {
+					return gtsMgr.GetStatus(r.Context())
+				}
+				return map[string]interface{}{"enabled": false}
+			}(),
 		}
 		_ = json.NewEncoder(w).Encode(respData)
 	})
@@ -1265,6 +1387,11 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
+		if cfg.EnableMastodon && gtsMgr != nil && gtsMgr.IsGoToSocialRoute(path) {
+			gtsMgr.ServeHTTP(w, r)
+			return
+		}
+
 		if strings.HasSuffix(path, "/peerjs") {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -1450,6 +1577,27 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 	fmt.Printf(" • WebTorrent Tracker : ws%s://%s:%d/tracker\n", map[bool]string{true: "s", false: ""}[cfg.EnableTLS], cfg.GetPublicIP(), cfg.HTTPPort)
 	fmt.Printf(" • Servidor TURN/STUN : turn:%s:%d (UDP)\n", cfg.GetPublicIP(), cfg.TURNPort)
 	fmt.Printf(" • Credenciales TURN  : user='%s', password='%s'\n", cfg.Username, cfg.Password)
+	if cfg.EnableGit {
+		gitProto := "http"
+		if cfg.EnableTLS {
+			gitProto = "https"
+		}
+		repoName := cfg.GitRepo
+		if repoName == "" {
+			repoName = "routes"
+		}
+		if !strings.HasSuffix(repoName, ".git") {
+			repoName += ".git"
+		}
+		fmt.Printf(" • Git Privado (Smart): %s://%s:%d/git/%s/%s\n", gitProto, cfg.GetPublicIP(), cfg.HTTPPort, cfg.Username, repoName)
+	}
+	if cfg.EnableMastodon {
+		mProto := "http"
+		if cfg.EnableTLS {
+			mProto = "https"
+		}
+		fmt.Printf(" • Nodo Mastodon (Fed): %s://%s/ (Handle: @admin@%s)\n", mProto, cfg.GetPublicIP(), cfg.GetPublicIP())
+	}
 	fmt.Printf(" • Panel Web / Wizard : http%s://%s:%d/\n", map[bool]string{true: "s", false: ""}[cfg.EnableTLS], cfg.GetPublicIP(), cfg.HTTPPort)
 
 	// UPnP Status

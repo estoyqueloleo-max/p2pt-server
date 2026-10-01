@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+description="GoToSocial Lightweight ActivityPub / Mastodon Server"
+
+command="/usr/bin/gotosocial"
+command_args="server start --config-path ${GTS_CONFIG:-/etc/gotosocial/config.yaml}"
+command_user="${GTS_USER:-root}"
+command_background="yes"
+pidfile="/run/gotosocial.pid"
+output_log="/var/log/gotosocial.log"
+error_log="/var/log/gotosocial.err"
+
+depend() {
+    need net
+    after p2pt
+}
+
+start_pre() {
+    checkpath -d -m 0755 /var/lib/gotosocial
+    checkpath -d -m 0755 /var/lib/gotosocial/storage
+    checkpath -d -m 0755 /etc/gotosocial
+}

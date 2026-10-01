@@ -9,12 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"time"
 )
 
-const CurrentVersion = "1.3.0"
+const CurrentVersion = "1.4.0"
 
 type GithubAsset struct {
 	Name               string `json:"name"`
@@ -147,7 +148,23 @@ func (u *UpdaterManager) DownloadAndApplyUpdate(assetURL string) error {
 		return fmt.Errorf("failed to replace executable: %w", err)
 	}
 
-	log.Println("✅ [Updater] Binario actualizado con éxito. El nuevo binario se ejecutará en el próximo reinicio.")
+	log.Println("✅ [Updater] Binario actualizado con éxito a la nueva versión.")
+
+	// Si estamos en Alpine Linux Diskless (con lbu disponible), persistir en MicroSD
+	if _, err := exec.LookPath("lbu"); err == nil {
+		log.Println("[Updater] 💾 Persistiendo actualización en MicroSD (lbu commit mmcblk0p1)...")
+		_ = exec.Command("lbu", "commit", "-d", "mmcblk0p1").Run()
+	}
+
+	// Reiniciar el servicio OpenRC automáticamente para aplicar la actualización en caliente
+	go func() {
+		time.Sleep(2 * time.Second)
+		if _, err := exec.LookPath("rc-service"); err == nil {
+			log.Println("[Updater] 🔄 Reiniciando servicio 'p2pt' con el nuevo binario...")
+			_ = exec.Command("rc-service", "p2pt", "restart").Run()
+		}
+	}()
+
 	return nil
 }
 

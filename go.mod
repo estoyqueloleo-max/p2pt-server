@@ -4,6 +4,7 @@ go 1.24.4
 
 require (
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
+	github.com/gofrs/uuid v4.0.0+incompatible // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/grandcat/zeroconf v1.0.0 // indirect
@@ -29,6 +30,7 @@ require (
 	github.com/pion/turn/v5 v5.1.0 // indirect
 	github.com/pion/webrtc/v4 v4.2.20 // indirect
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
+	github.com/sosedoff/gitkit v0.4.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
