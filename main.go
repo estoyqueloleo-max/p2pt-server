@@ -878,7 +878,10 @@ func main() {
 			mux.HandleFunc("/git/", gitServer.ServeHTTP)
 			mux.HandleFunc("/git", gitServer.ServeHTTP)
 			mux.HandleFunc("/api/git/repos", gitServer.HandleListRepos)
-			log.Printf("[GitServer] 🚀 Smart HTTP Git activo en /git/:user/:repo.git")
+			mux.HandleFunc("/git-credentials", gitServer.HandleGitCredentials)
+			mux.HandleFunc("/api/git/revoke", authMgr.RequireAuth(gitServer.HandleRevokePeer))
+			mux.HandleFunc("/api/git/unrevoke", authMgr.RequireAuth(gitServer.HandleUnrevokePeer))
+			log.Printf("[GitServer] 🚀 Smart HTTP Git activo en /git/:user/:repo.git y credenciales en /git-credentials")
 		}
 	}
 
@@ -1424,7 +1427,7 @@ func main() {
 				authMgr.RenderLoginPage(w, r, "")
 				return
 			}
-			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, tracker, turnMonitor)
+			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, tracker, turnMonitor, gitServer)
 			return
 		}
 
@@ -1639,7 +1642,7 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 	fmt.Println("==================================================================")
 }
 
-func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor) {
+func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor, gitServer *GitServer) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	currentWiFiSSID := ""
@@ -1711,7 +1714,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 				🚫 Lista Negra de IPs Bloqueadas
 				<span class="badge badge-error" style="font-size:0.7rem;">` + fmt.Sprintf("%d Bloqueadas", len(blockedIPs)) + `</span>
 			</h4>
-			<table style="width:100%%; border-collapse:collapse; font-size:0.82rem; text-align:left;">
+			<table style="width:100%; border-collapse:collapse; font-size:0.82rem; text-align:left;">
 				<thead>
 					<tr style="border-bottom:1px solid rgba(255,255,255,0.08); color:var(--text-muted);">
 						<th style="padding:6px 8px;">IP Denegada</th>
@@ -1734,6 +1737,92 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 			</tr>`, b.IP, untilStr, b.IP))
 		}
 		blockedSectionHTML.WriteString(`</tbody></table></div>`)
+	}
+
+	var gitSectionHTML strings.Builder
+	if gitServer != nil {
+		repos := gitServer.scanRepos()
+		revokedMap := make(map[string]bool)
+		for _, p := range gitServer.GetRevokedPeers() {
+			revokedMap[p] = true
+		}
+
+		var gitRows strings.Builder
+		if len(repos) == 0 && len(revokedMap) == 0 {
+			gitRows.WriteString(`<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:14px;">Aún no hay repositorios creados. Los repositorios privados se inicializan automáticamente al conectar cada Peer.</td></tr>`)
+		} else {
+			seenNamespaces := make(map[string]bool)
+			for _, repo := range repos {
+				seenNamespaces[repo.Namespace] = true
+				isRevoked := revokedMap[repo.Namespace]
+				statusBadge := `<span class="badge badge-success">🟢 Activo</span>`
+				actionBtn := fmt.Sprintf(`<button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar Peer</button>`, repo.Namespace)
+				if isRevoked {
+					statusBadge = `<span class="badge badge-error">🚫 Revocado</span>`
+					actionBtn = fmt.Sprintf(`<button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>`, repo.Namespace)
+				}
+				sizeKB := float64(repo.Size) / 1024.0
+
+				gitRows.WriteString(fmt.Sprintf(`<tr>
+					<td style="padding:10px; font-family:monospace; color:var(--accent); font-weight:600;">%s</td>
+					<td style="padding:10px; font-family:monospace; font-size:0.8rem; word-break:break-all;">%s</td>
+					<td style="padding:10px;">%.1f KB</td>
+					<td style="padding:10px;">%s</td>
+					<td style="padding:10px;">%s</td>
+				</tr>`, repo.Namespace, repo.URL, sizeKB, statusBadge, actionBtn))
+			}
+
+			for p := range revokedMap {
+				if !seenNamespaces[p] {
+					actionBtn := fmt.Sprintf(`<button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>`, p)
+					gitRows.WriteString(fmt.Sprintf(`<tr>
+						<td style="padding:10px; font-family:monospace; color:var(--accent); font-weight:600;">%s</td>
+						<td style="padding:10px; color:var(--text-muted); font-size:0.8rem;">(Sin repositorio en disco)</td>
+						<td style="padding:10px;">-</td>
+						<td style="padding:10px;"><span class="badge badge-error">🚫 Revocado</span></td>
+						<td style="padding:10px;">%s</td>
+					</tr>`, p, actionBtn))
+				}
+			}
+		}
+
+		gitSectionHTML.WriteString(fmt.Sprintf(`
+		<div class="card" style="margin-top:20px;">
+			<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:10px;">
+				<h3 style="margin:0; display:flex; align-items:center; gap:8px;">
+					📦 Repositorios Git Privados por Peer (Smart HTTP)
+					<span class="badge badge-info">%d Repos</span>
+				</h3>
+			</div>
+			<p style="margin:0 0 14px 0; color:var(--text-muted); font-size:0.85rem;">
+				Cada usuario o dispositivo Pingo dispone de su propio repositorio privado y aislado indexado por su <code>peerId</code>. Los tokens se generan efímeramente con HMAC sin compartir la contraseña maestra del appliance.
+			</p>
+			<div style="overflow-x:auto;">
+				<table style="width:100%%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
+					<thead>
+						<tr style="border-bottom:1px solid rgba(255,255,255,0.1); color:var(--text-muted);">
+							<th style="padding:8px 10px;">Peer ID / Namespace</th>
+							<th style="padding:8px 10px;">URL Remota Git</th>
+							<th style="padding:8px 10px;">Tamaño</th>
+							<th style="padding:8px 10px;">Estado</th>
+							<th style="padding:8px 10px;">Acción</th>
+						</tr>
+					</thead>
+					<tbody>
+						%s
+					</tbody>
+				</table>
+			</div>
+
+			<div style="margin-top:16px; padding:12px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:8px;">
+				<h4 style="margin:0 0 8px 0; font-size:0.88rem; color:var(--text-muted);">🔑 Probar o Generar Credenciales Git para un Peer</h4>
+				<div style="display:flex; gap:8px; flex-wrap:wrap;">
+					<input id="git-peer-input" type="text" placeholder="Peer ID (ej: pingo-jose-mvl)" style="flex:1; min-width:200px; padding:6px 10px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.15); border-radius:6px; color:white; font-family:monospace; font-size:0.85rem;">
+					<button onclick="requestGitCredentials()" class="btn btn-secondary" style="padding:6px 14px; font-size:0.85rem; cursor:pointer;">Generar Token</button>
+				</div>
+				<div id="git-credentials-result" style="display:none; margin-top:10px; padding:10px; background:rgba(0,0,0,0.4); border-radius:6px; font-size:0.8rem; font-family:monospace; word-break:break-all;"></div>
+			</div>
+		</div>`, len(repos), gitRows.String()))
 	}
 
 	qrPNG, _ := qrcode.Encode(pairURL, qrcode.Medium, 256)
@@ -2111,6 +2200,8 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             </div>
             %s
         </div>
+
+        %s
 
         <div class="card">
             <h3>⚙️ Configuración JSON para Pingo</h3>
@@ -2505,6 +2596,62 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
         }
 
+        async function revokeGitPeer(peerId) {
+            if (!confirm("¿Deseas revocar el acceso a Git para el Peer '" + peerId + "'?")) return;
+            try {
+                const res = await fetch("/api/git/revoke", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ peerId: peerId })
+                });
+                const d = await res.json();
+                if (d.success) window.location.reload();
+            } catch (err) {
+                alert("Error revocando peer: " + err.message);
+            }
+        }
+
+        async function unrevokeGitPeer(peerId) {
+            try {
+                const res = await fetch("/api/git/unrevoke", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ peerId: peerId })
+                });
+                const d = await res.json();
+                if (d.success) window.location.reload();
+            } catch (err) {
+                alert("Error restaurando peer: " + err.message);
+            }
+        }
+
+        async function requestGitCredentials() {
+            const peerId = document.getElementById("git-peer-input").value.trim();
+            const resDiv = document.getElementById("git-credentials-result");
+            if (!peerId) {
+                alert("Por favor introduce un Peer ID");
+                return;
+            }
+            try {
+                const res = await fetch("/git-credentials?peerId=" + encodeURIComponent(peerId));
+                const data = await res.json();
+                if (data.error) {
+                    resDiv.style.display = "block";
+                    resDiv.style.color = "#f87171";
+                    resDiv.innerText = "Error: " + data.error;
+                    return;
+                }
+                resDiv.style.display = "block";
+                resDiv.style.color = "var(--accent)";
+                resDiv.innerHTML = "<b>Repositorio URL:</b> " + data.url + "<br>" +
+                                   "<b>Usuario:</b> " + data.username + "<br>" +
+                                   "<b>Token:</b> " + data.token + "<br>" +
+                                   "<b>Git Clone:</b> <code>git clone " + data.url.replace("://", "://" + encodeURIComponent(data.username) + ":" + encodeURIComponent(data.token) + "@") + "</code>";
+            } catch (err) {
+                alert("Error solicitando credenciales: " + err.message);
+            }
+        }
+
         async function logout() {
             try {
                 await fetch("/api/auth/logout", { method: "POST" });
@@ -2534,6 +2681,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		blockedCount,
 		sessionsRows.String(),
 		blockedSectionHTML.String(),
+		gitSectionHTML.String(),
 		string(configJSONBytes),
 		pairURL,
 	)
