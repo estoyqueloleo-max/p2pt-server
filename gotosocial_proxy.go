@@ -73,6 +73,7 @@ func NewGoToSocialManager(cfg *Config) (*GoToSocialManager, error) {
 			clientIP = prior + ", " + clientIP
 		}
 		req.Header.Set("X-Forwarded-For", clientIP)
+		req.Header.Set("X-Real-IP", clientIP)
 	}
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -106,10 +107,14 @@ func (m *GoToSocialManager) IsGoToSocialRoute(path string) bool {
 		return true
 	}
 
-	// Mastodon Client API (v1 / v2) and OAuth
+	// Mastodon Client API (v1 / v2), OAuth and Auth Web UI
 	if strings.HasPrefix(path, "/api/v1/") ||
 		strings.HasPrefix(path, "/api/v2/") ||
-		strings.HasPrefix(path, "/oauth/") {
+		strings.HasPrefix(path, "/oauth/") ||
+		strings.HasPrefix(path, "/auth/") ||
+		strings.HasPrefix(path, "/assets/") ||
+		strings.HasPrefix(path, "/settings/") ||
+		strings.HasPrefix(path, "/admin/") {
 		return true
 	}
 
