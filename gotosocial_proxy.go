@@ -199,40 +199,59 @@ func EnsureGoToSocialConfigFile(cfg *Config, targetPath string) error {
 	}
 
 	publicHost := cfg.GetPublicIP()
+	if cfg.HTTPPort > 0 && cfg.HTTPPort != 80 && cfg.HTTPPort != 443 && !strings.Contains(publicHost, ":") {
+		publicHost = fmt.Sprintf("%s:%d", publicHost, cfg.HTTPPort)
+	}
+	proto := "http"
+	if cfg.EnableTLS {
+		proto = "https"
+	}
 	port := 8080
 
 	content := fmt.Sprintf(`############################################################
 # GoToSocial Configuration - Appliance Low-Memory Profile
 ############################################################
 
-# Host and Domain for Fediverse identification
+# Host for Fediverse identification
 host: "%s"
-domain: "%s"
+
+# Protocol for public URLs
+protocol: "%s"
 
 # Network Binding (Internal only, reverse proxied by p2pt-server)
 bind-address: "127.0.0.1"
 port: %d
 
+trusted-proxies:
+  - "127.0.0.1/32"
+  - "::1"
+
 # Database (Lightweight SQLite for embedded / RPi)
 db-type: "sqlite"
-db-address: "/var/lib/gotosocial/database.sqlite"
+db-address: "/mnt/data/gotosocial/database.sqlite"
 
 # Media Storage
 storage-backend: "local"
-storage-local-base-path: "/var/lib/gotosocial/storage"
+storage-local-base-path: "/mnt/data/gotosocial/storage"
+
+# Web Assets and Templates
+web-template-base-dir: "/mnt/data/gotosocial/web/template/"
+web-asset-base-dir: "/mnt/data/gotosocial/web/assets/"
 
 # Aggressive cache eviction to preserve Raspberry Pi SD card space
-media-remote-cache-days: 2
-media-cleanup-every: "24h"
+media-remote-cache-duration: "48h"
+media-local-max-size: "10MiB"
+media-remote-max-size: "10MiB"
 
 # Application Performance Tuning for Low RAM
 advanced-rate-limit-requests: 150
 instance-expose-peers: true
-instance-federation-mode: "standard"
+instance-federation-mode: "blocklist"
 
 # Accounts
 accounts-registration-open: false
-`, publicHost, publicHost, port)
+log-level: "info"
+`, publicHost, proto, port)
 
 	if err := os.WriteFile(targetPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("error escribiendo %s: %w", targetPath, err)
