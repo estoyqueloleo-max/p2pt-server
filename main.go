@@ -881,6 +881,7 @@ func main() {
 			mux.HandleFunc("/git-credentials", gitServer.HandleGitCredentials)
 			mux.HandleFunc("/api/git/revoke", authMgr.RequireAuth(gitServer.HandleRevokePeer))
 			mux.HandleFunc("/api/git/unrevoke", authMgr.RequireAuth(gitServer.HandleUnrevokePeer))
+			mux.HandleFunc("/api/git/unlock", authMgr.RequireAuth(gitServer.HandleUnlockPeer))
 			log.Printf("[GitServer] 🚀 Smart HTTP Git activo en /git/:user/:repo.git y credenciales en /git-credentials")
 		}
 	}
@@ -1742,24 +1743,31 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 	var gitSectionHTML strings.Builder
 	if gitServer != nil {
 		repos := gitServer.scanRepos()
+		claims := gitServer.GetAllClaims()
 		revokedMap := make(map[string]bool)
 		for _, p := range gitServer.GetRevokedPeers() {
 			revokedMap[p] = true
 		}
 
 		var gitRows strings.Builder
-		if len(repos) == 0 && len(revokedMap) == 0 {
+		if len(repos) == 0 && len(claims) == 0 {
 			gitRows.WriteString(`<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:14px;">Aún no hay repositorios creados. Los repositorios privados se inicializan automáticamente al conectar cada Peer.</td></tr>`)
 		} else {
 			seenNamespaces := make(map[string]bool)
 			for _, repo := range repos {
 				seenNamespaces[repo.Namespace] = true
 				isRevoked := revokedMap[repo.Namespace]
-				statusBadge := `<span class="badge badge-success">🟢 Activo</span>`
-				actionBtn := fmt.Sprintf(`<button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar Peer</button>`, repo.Namespace)
+				claim, hasClaim := claims[repo.Namespace]
+
+				statusBadge := `<span class="badge badge-info">⚪ No Reclamado</span>`
+				actionBtn := fmt.Sprintf(`<button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button>`, repo.Namespace)
+
 				if isRevoked {
 					statusBadge = `<span class="badge badge-error">🚫 Revocado</span>`
 					actionBtn = fmt.Sprintf(`<button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>`, repo.Namespace)
+				} else if hasClaim && claim.TokenHash != "" {
+					statusBadge = `<span class="badge badge-success">🔒 Vinculado (Reclamado)</span>`
+					actionBtn = fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unlockGitPeer('%s')" class="btn" style="background:#f59e0b; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Permite que un nuevo dispositivo vuelva a reclamar credenciales">🔓 Desbloquear</button><button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button></div>`, repo.Namespace, repo.Namespace)
 				}
 				sizeKB := float64(repo.Size) / 1024.0
 
@@ -1772,16 +1780,21 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 				</tr>`, repo.Namespace, repo.URL, sizeKB, statusBadge, actionBtn))
 			}
 
-			for p := range revokedMap {
+			for p, claim := range claims {
 				if !seenNamespaces[p] {
-					actionBtn := fmt.Sprintf(`<button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>`, p)
+					statusBadge := `<span class="badge badge-success">🔒 Vinculado (Reclamado)</span>`
+					actionBtn := fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unlockGitPeer('%s')" class="btn" style="background:#f59e0b; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Permite que un nuevo dispositivo vuelva a reclamar credenciales">🔓 Desbloquear</button><button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button></div>`, p, p)
+					if claim.Revoked || revokedMap[p] {
+						statusBadge = `<span class="badge badge-error">🚫 Revocado</span>`
+						actionBtn = fmt.Sprintf(`<button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>`, p)
+					}
 					gitRows.WriteString(fmt.Sprintf(`<tr>
 						<td style="padding:10px; font-family:monospace; color:var(--accent); font-weight:600;">%s</td>
-						<td style="padding:10px; color:var(--text-muted); font-size:0.8rem;">(Sin repositorio en disco)</td>
+						<td style="padding:10px; color:var(--text-muted); font-size:0.8rem;">(Pendiente primer push)</td>
 						<td style="padding:10px;">-</td>
-						<td style="padding:10px;"><span class="badge badge-error">🚫 Revocado</span></td>
 						<td style="padding:10px;">%s</td>
-					</tr>`, p, actionBtn))
+						<td style="padding:10px;">%s</td>
+					</tr>`, p, statusBadge, actionBtn))
 				}
 			}
 		}
@@ -2622,6 +2635,21 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 if (d.success) window.location.reload();
             } catch (err) {
                 alert("Error restaurando peer: " + err.message);
+            }
+        }
+
+        async function unlockGitPeer(peerId) {
+            if (!confirm("¿Deseas desbloquear la vinculación para el Peer '" + peerId + "'? Esto permitirá que un nuevo dispositivo vuelva a reclamar credenciales.")) return;
+            try {
+                const res = await fetch("/api/git/unlock", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ peerId: peerId })
+                });
+                const d = await res.json();
+                if (d.success) window.location.reload();
+            } catch (err) {
+                alert("Error desbloqueando peer: " + err.message);
             }
         }
 

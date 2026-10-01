@@ -2,8 +2,8 @@
 
 description="GoToSocial Lightweight ActivityPub / Mastodon Server"
 
-command="/mnt/data/bin/gotosocial"
-command_args="server start --config-path ${GTS_CONFIG:-/mnt/data/gotosocial/config.yaml}"
+command="/usr/bin/gotosocial"
+command_args="server start --config-path ${GTS_CONFIG:-/etc/gotosocial/config.yaml}"
 command_user="${GTS_USER:-root}"
 command_background="yes"
 pidfile="/run/gotosocial.pid"
@@ -16,9 +16,7 @@ depend() {
 }
 
 start_pre() {
-    checkpath -d -m 0755 /mnt/data/gotosocial
-    checkpath -d -m 0755 /mnt/data/gotosocial/storage
-    mkdir -p /etc/gotosocial
-    ln -sf /mnt/data/gotosocial/config.yaml /etc/gotosocial/config.yaml 2>/dev/null || true
-    ln -sf /mnt/data/bin/gotosocial /usr/bin/gotosocial 2>/dev/null || true
+    checkpath -d -m 0755 /var/lib/gotosocial
+    checkpath -d -m 0755 /var/lib/gotosocial/storage
+    checkpath -d -m 0755 /etc/gotosocial
 }

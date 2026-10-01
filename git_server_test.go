@@ -237,7 +237,28 @@ func TestGitServer_CredentialsAndPeerIsolation(t *testing.T) {
 		t.Fatal("Expected token in response")
 	}
 
-	// 2. Peer-1 accesses their own repository: should succeed and create bare repo JIT
+	// 2. Re-requesting credentials anonymously for already claimed peer MUST be rejected (409 Conflict)
+	reqReclaim := httptest.NewRequest("GET", "/git-credentials?peerId=pingo-peer-1", nil)
+	wReclaim := httptest.NewRecorder()
+	server.HandleGitCredentials(wReclaim, reqReclaim)
+	if wReclaim.Code != http.StatusConflict {
+		t.Errorf("Expected status 409 Conflict when re-requesting claimed peer, got %d", wReclaim.Code)
+	}
+
+	// 3. Re-requesting credentials providing current token MUST succeed (owner refresh)
+	reqRefresh := httptest.NewRequest("GET", "/git-credentials?peerId=pingo-peer-1&token="+credsResp.Token, nil)
+	wRefresh := httptest.NewRecorder()
+	server.HandleGitCredentials(wRefresh, reqRefresh)
+	if wRefresh.Code != http.StatusOK {
+		t.Errorf("Expected status 200 OK when owner refreshes credentials with valid token, got %d", wRefresh.Code)
+	}
+	var refreshResp struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(wRefresh.Body).Decode(&refreshResp)
+	credsResp.Token = refreshResp.Token
+
+	// 4. Peer-1 accesses their own repository: should succeed and create bare repo JIT
 	reqOwn := httptest.NewRequest("GET", "/git/pingo-peer-1/routes.git/info/refs?service=git-upload-pack", nil)
 	basicAuthOwn := "Basic " + base64.StdEncoding.EncodeToString([]byte(credsResp.Username+":"+credsResp.Token))
 	reqOwn.Header.Set("Authorization", basicAuthOwn)
@@ -248,7 +269,7 @@ func TestGitServer_CredentialsAndPeerIsolation(t *testing.T) {
 		t.Fatalf("Expected status 200 OK for peer accessing own repo with HMAC token, got %d", wOwn.Code)
 	}
 
-	// 3. Peer-1 tries to access Peer-2's repository: should be denied (401 Unauthorized isolation)
+	// 5. Peer-1 tries to access Peer-2's repository: should be denied (401 Unauthorized isolation)
 	reqOther := httptest.NewRequest("GET", "/git/pingo-peer-2/routes.git/info/refs?service=git-upload-pack", nil)
 	reqOther.Header.Set("Authorization", basicAuthOwn)
 	wOther := httptest.NewRecorder()
@@ -258,7 +279,7 @@ func TestGitServer_CredentialsAndPeerIsolation(t *testing.T) {
 		t.Errorf("Expected isolation to block peer-1 from peer-2 repo (401), got %d", wOther.Code)
 	}
 
-	// 4. Revocation test: revoke peer-1
+	// 6. Revocation test: revoke peer-1
 	server.RevokePeer("pingo-peer-1")
 	if !server.IsPeerRevoked("pingo-peer-1") {
 		t.Error("Expected pingo-peer-1 to be marked as revoked")
@@ -279,7 +300,7 @@ func TestGitServer_CredentialsAndPeerIsolation(t *testing.T) {
 		t.Errorf("Expected revoked peer to be denied git access (401), got %d", wRevokedAccess.Code)
 	}
 
-	// 5. Unrevoke test: restore access
+	// 7. Unrevoke test: restore access
 	server.UnrevokePeer("pingo-peer-1")
 	if server.IsPeerRevoked("pingo-peer-1") {
 		t.Error("Expected pingo-peer-1 to no longer be revoked")
@@ -289,6 +310,41 @@ func TestGitServer_CredentialsAndPeerIsolation(t *testing.T) {
 	server.ServeHTTP(wRestoredAccess, reqOwn)
 	if wRestoredAccess.Code != http.StatusOK {
 		t.Errorf("Expected restored access for unrevoked peer, got %d", wRestoredAccess.Code)
+	}
+
+	// 8. Admin unlocks peer-1 claim to transfer/bind to a new device
+	server.UnlockPeerClaim("pingo-peer-1")
+	if server.GetPeerClaim("pingo-peer-1") != nil {
+		t.Error("Expected pingo-peer-1 claim to be unlocked")
+	}
+
+	// New device now claims pingo-peer-1
+	reqNewDevice := httptest.NewRequest("GET", "/git-credentials?peerId=pingo-peer-1", nil)
+	wNewDevice := httptest.NewRecorder()
+	server.HandleGitCredentials(wNewDevice, reqNewDevice)
+	if wNewDevice.Code != http.StatusOK {
+		t.Fatalf("Expected new device to successfully claim unlocked peer-1, got %d", wNewDevice.Code)
+	}
+
+	var newCredsResp struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(wNewDevice.Body).Decode(&newCredsResp)
+
+	// Old token should now be rejected because active device claim was rotated
+	wOldTokenAccess := httptest.NewRecorder()
+	server.ServeHTTP(wOldTokenAccess, reqOwn)
+	if wOldTokenAccess.Code != http.StatusUnauthorized {
+		t.Errorf("Expected old token to be rejected after claim rotation (401), got %d", wOldTokenAccess.Code)
+	}
+
+	// New token should work
+	reqNewToken := httptest.NewRequest("GET", "/git/pingo-peer-1/routes.git/info/refs?service=git-upload-pack", nil)
+	reqNewToken.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("pingo-peer-1:"+newCredsResp.Token)))
+	wNewTokenAccess := httptest.NewRecorder()
+	server.ServeHTTP(wNewTokenAccess, reqNewToken)
+	if wNewTokenAccess.Code != http.StatusOK {
+		t.Errorf("Expected new token to be accepted, got %d", wNewTokenAccess.Code)
 	}
 }
 

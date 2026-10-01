@@ -42,15 +42,29 @@ func (gs *GitServer) HandleUnrevokePeer(w http.ResponseWriter, r *http.Request) 
 	http.Error(w, `{"error":"Embedded Git server is not supported on Windows"}`, http.StatusNotImplemented)
 }
 
+func (gs *GitServer) HandleUnlockPeer(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, `{"error":"Embedded Git server is not supported on Windows"}`, http.StatusNotImplemented)
+}
+
 func (gs *GitServer) RevokePeer(peerID string) {}
 
 func (gs *GitServer) UnrevokePeer(peerID string) {}
+
+func (gs *GitServer) UnlockPeerClaim(peerID string) {}
 
 func (gs *GitServer) IsPeerRevoked(peerID string) bool {
 	return false
 }
 
 func (gs *GitServer) GetRevokedPeers() []string {
+	return nil
+}
+
+func (gs *GitServer) GetPeerClaim(peerID string) *PeerClaim {
+	return nil
+}
+
+func (gs *GitServer) GetAllClaims() map[string]*PeerClaim {
 	return nil
 }
 

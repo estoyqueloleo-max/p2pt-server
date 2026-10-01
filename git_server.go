@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,6 +25,8 @@ type GitServer struct {
 	authMgr      *AuthManager
 	gitkitServer *gitkit.Server
 	rootDir      string
+	claimsFile   string
+	claims       map[string]*PeerClaim
 	revokedPeers map[string]time.Time
 	mu           sync.RWMutex
 }
@@ -59,12 +62,16 @@ func NewGitServer(cfg *Config, authMgr *AuthManager) (*GitServer, error) {
 		return nil, fmt.Errorf("fallo al crear directorio base de git %s: %w", absRootDir, err)
 	}
 
+	claimsPath := filepath.Join(absRootDir, ".git_claims.json")
 	gs := &GitServer{
 		cfg:          cfg,
 		authMgr:      authMgr,
 		rootDir:      absRootDir,
+		claimsFile:   claimsPath,
+		claims:       make(map[string]*PeerClaim),
 		revokedPeers: make(map[string]time.Time),
 	}
+	gs.loadClaims()
 
 	// Configure gitkit
 	gkConfig := gitkit.Config{
@@ -91,25 +98,76 @@ func NewGitServer(cfg *Config, authMgr *AuthManager) (*GitServer, error) {
 	return gs, nil
 }
 
+func (gs *GitServer) loadClaims() {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	data, err := os.ReadFile(gs.claimsFile)
+	if err != nil {
+		return
+	}
+	var loaded map[string]*PeerClaim
+	if err := json.Unmarshal(data, &loaded); err == nil && loaded != nil {
+		gs.claims = loaded
+		for peer, claim := range loaded {
+			if claim.Revoked {
+				gs.revokedPeers[peer] = time.Now()
+			}
+		}
+	}
+}
+
+func (gs *GitServer) saveClaimsLocked() {
+	if gs.claimsFile == "" {
+		return
+	}
+	data, err := json.MarshalIndent(gs.claims, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(gs.claimsFile, data, 0644)
+	}
+}
+
 // RevokePeer revokes Git access for a specific peerId
 func (gs *GitServer) RevokePeer(peerID string) {
 	gs.mu.Lock()
 	defer gs.mu.Unlock()
-	gs.revokedPeers[strings.TrimSpace(peerID)] = time.Now()
+	clean := strings.TrimSpace(peerID)
+	gs.revokedPeers[clean] = time.Now()
+	if c, ok := gs.claims[clean]; ok {
+		c.Revoked = true
+	}
+	gs.saveClaimsLocked()
 }
 
 // UnrevokePeer restores Git access for a previously revoked peerId
 func (gs *GitServer) UnrevokePeer(peerID string) {
 	gs.mu.Lock()
 	defer gs.mu.Unlock()
-	delete(gs.revokedPeers, strings.TrimSpace(peerID))
+	clean := strings.TrimSpace(peerID)
+	delete(gs.revokedPeers, clean)
+	if c, ok := gs.claims[clean]; ok {
+		c.Revoked = false
+	}
+	gs.saveClaimsLocked()
+}
+
+// UnlockPeerClaim clears a claim lock so another device can claim the peerId
+func (gs *GitServer) UnlockPeerClaim(peerID string) {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	clean := strings.TrimSpace(peerID)
+	delete(gs.claims, clean)
+	gs.saveClaimsLocked()
 }
 
 // IsPeerRevoked checks whether a peerId has been revoked by admin
 func (gs *GitServer) IsPeerRevoked(peerID string) bool {
 	gs.mu.RLock()
 	defer gs.mu.RUnlock()
-	_, exists := gs.revokedPeers[strings.TrimSpace(peerID)]
+	clean := strings.TrimSpace(peerID)
+	if c, ok := gs.claims[clean]; ok && c.Revoked {
+		return true
+	}
+	_, exists := gs.revokedPeers[clean]
 	return exists
 }
 
@@ -117,11 +175,44 @@ func (gs *GitServer) IsPeerRevoked(peerID string) bool {
 func (gs *GitServer) GetRevokedPeers() []string {
 	gs.mu.RLock()
 	defer gs.mu.RUnlock()
-	list := make([]string, 0, len(gs.revokedPeers))
+	revokedMap := make(map[string]bool)
 	for p := range gs.revokedPeers {
+		revokedMap[p] = true
+	}
+	for p, c := range gs.claims {
+		if c.Revoked {
+			revokedMap[p] = true
+		}
+	}
+	list := make([]string, 0, len(revokedMap))
+	for p := range revokedMap {
 		list = append(list, p)
 	}
 	return list
+}
+
+// GetPeerClaim returns a copy of the claim for peerID, or nil
+func (gs *GitServer) GetPeerClaim(peerID string) *PeerClaim {
+	gs.mu.RLock()
+	defer gs.mu.RUnlock()
+	c, ok := gs.claims[strings.TrimSpace(peerID)]
+	if !ok {
+		return nil
+	}
+	cp := *c
+	return &cp
+}
+
+// GetAllClaims returns a copy of all active peer claims
+func (gs *GitServer) GetAllClaims() map[string]*PeerClaim {
+	gs.mu.RLock()
+	defer gs.mu.RUnlock()
+	res := make(map[string]*PeerClaim, len(gs.claims))
+	for k, v := range gs.claims {
+		cp := *v
+		res[k] = &cp
+	}
+	return res
 }
 
 // authenticateRequest validates credentials and enforces per-user repository isolation
@@ -152,6 +243,26 @@ func (gs *GitServer) authenticateRequest(cred gitkit.Credential, req *gitkit.Req
 		secret = gs.cfg.Password
 	}
 	isValidGitToken := ValidateGitToken(secret, username, password)
+
+	// If token has valid HMAC, enforce device claim match
+	if isValidGitToken {
+		gs.mu.Lock()
+		claim, hasClaim := gs.claims[username]
+		if hasClaim {
+			if claim.Revoked {
+				gs.mu.Unlock()
+				return false, fmt.Errorf("acceso denegado: peer revocado")
+			}
+			if HashGitToken(password) != claim.TokenHash {
+				gs.mu.Unlock()
+				log.Printf("[GitServer] 🚫 Token no coincide con el dispositivo reclamado para peer '%s'", username)
+				return false, fmt.Errorf("token desactualizado o no válido para este dispositivo")
+			}
+			claim.LastUsed = time.Now()
+			gs.saveClaimsLocked()
+		}
+		gs.mu.Unlock()
+	}
 
 	// 3. Appliance user credentials (from config, for backwards compatibility)
 	isApplianceUser := (username == gs.cfg.Username && password == gs.cfg.Password)
@@ -245,16 +356,18 @@ func (gs *GitServer) HandleListRepos(w http.ResponseWriter, r *http.Request) {
 
 	repos := gs.scanRepos()
 	revoked := gs.GetRevokedPeers()
+	claims := gs.GetAllClaims()
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":       true,
 		"root_dir":      gs.rootDir,
 		"repos":         repos,
 		"count":         len(repos),
 		"revoked_peers": revoked,
+		"claims":        claims,
 	})
 }
 
-// HandleGitCredentials generates a per-peer private repository URL and ephemeral HMAC access token
+// HandleGitCredentials generates a per-peer private repository URL and ephemeral HMAC access token with First-Claim locking
 func (gs *GitServer) HandleGitCredentials(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -302,6 +415,31 @@ func (gs *GitServer) HandleGitCredentials(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Check First-Claim (TOFU) lock: If peer already claimed by another device, disallow anonymous re-issuance
+	claim := gs.GetPeerClaim(peerID)
+	if claim != nil && claim.TokenHash != "" {
+		isAdmin := gs.authMgr != nil && gs.authMgr.IsAuthenticated(r)
+
+		providedToken := strings.TrimSpace(r.URL.Query().Get("token"))
+		if providedToken == "" {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+				providedToken = strings.TrimSpace(authHeader[7:])
+			}
+		}
+		isOwner := providedToken != "" && HashGitToken(providedToken) == claim.TokenHash
+
+		if !isAdmin && !isOwner {
+			w.WriteHeader(http.StatusConflict) // 409 Conflict
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "peer_already_claimed",
+				"message": fmt.Sprintf("El Peer '%s' ya ha sido reclamado y vinculado a otro dispositivo. Para vincular un nuevo dispositivo, el administrador debe desbloquearlo desde el Dashboard.", peerID),
+				"claimed": true,
+			})
+			return
+		}
+	}
+
 	// TTL: default 30 days (2592000 seconds)
 	ttlSec := 30 * 24 * 3600
 	if ttlStr := r.URL.Query().Get("ttl"); ttlStr != "" {
@@ -316,6 +454,28 @@ func (gs *GitServer) HandleGitCredentials(w http.ResponseWriter, r *http.Request
 		secret = gs.cfg.Password
 	}
 	token := GenerateGitToken(secret, peerID, expiry)
+
+	// Register or update active device claim
+	clientIP := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(clientIP); err == nil {
+		clientIP = host
+	}
+	if gs.authMgr != nil {
+		clientIP = gs.authMgr.GetClientIP(r)
+	}
+
+	gs.mu.Lock()
+	gs.claims[peerID] = &PeerClaim{
+		PeerID:    peerID,
+		TokenHash: HashGitToken(token),
+		ClaimedAt: time.Now(),
+		ExpiresAt: expiry,
+		ClientIP:  clientIP,
+		LastUsed:  time.Now(),
+		Revoked:   false,
+	}
+	gs.saveClaimsLocked()
+	gs.mu.Unlock()
 
 	proto := "http"
 	if gs.cfg.EnableTLS {
@@ -339,9 +499,36 @@ func (gs *GitServer) HandleGitCredentials(w http.ResponseWriter, r *http.Request
 		"repo":       repoName,
 		"expires_at": expiry.Unix(),
 		"ttl":        ttlSec,
+		"claimed":    true,
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// HandleUnlockPeer releases a peerId claim so it can be claimed by a new device
+func (gs *GitServer) HandleUnlockPeer(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		PeerID string `json:"peerId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.PeerID) == "" {
+		http.Error(w, `{"error":"peerId requerido"}`, http.StatusBadRequest)
+		return
+	}
+
+	peerID := strings.TrimSpace(req.PeerID)
+	gs.UnlockPeerClaim(peerID)
+	log.Printf("[GitServer] 🔓 Reclamación de peer '%s' desbloqueada por admin", peerID)
+
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"unlocked": peerID,
+	})
 }
 
 // HandleRevokePeer revokes Git access for a specific peerId
