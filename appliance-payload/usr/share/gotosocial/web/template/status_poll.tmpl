@@ -1,0 +1,81 @@
+{{- /*
+// GoToSocial
+// Copyright (C) GoToSocial Authors admin@gotosocial.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/ -}}
+
+{{- /*
+        Template for rendering a web view of a poll.
+        To use this template, pass a web view status into it.
+*/ -}}
+
+{{- define "votes" -}}
+    {{- if eq . 1 -}}
+        {{- . -}}&nbsp;vote
+    {{- else -}}
+        {{- . }}&nbsp;votes
+    {{- end -}}
+{{- end -}}
+
+{{- with . }}
+<figure class="poll">
+    <figcaption class="poll-info">
+        <span class="poll-expiry">
+            {{- if .Poll.Multiple -}}
+            Multiple-choice poll&nbsp;
+            {{- else -}}
+            Poll&nbsp;
+            {{- end -}}
+            {{- if .Poll.Expired -}}
+            closed <time datetime="{{- .Poll.ExpiresAt -}}">{{- .Poll.ExpiresAt | timestampPrecise -}}</time>
+            {{- else if .Poll.ExpiresAt -}}
+            open until <time datetime="{{- .Poll.ExpiresAt -}}">{{- .Poll.ExpiresAt | timestampPrecise -}}</time>
+            {{- else -}}
+            open forever
+            {{- end -}}
+        </span>
+        <span class="sr-only">,</span>
+        <span class="total-votes">
+            {{- template "votes" .Poll.VotesCount -}}&nbsp;
+            {{- if .Poll.Expired -}}
+                total
+            {{- else -}}
+                so far
+            {{- end -}}
+        </span>
+    </figcaption>
+    <ul class="poll-options nodot">
+    {{- range $index, $pollOption := .PollOptions }}
+        <li class="poll-option">
+            <span class="sr-only">Option {{ increment $index }},</span>
+            <span lang="{{- .LanguageTag.TagStr -}}">{{ emojify .Emojis (noescape $pollOption.Title) }}</span>
+            <meter aria-hidden="true" min="0" max="100" value="{{- $pollOption.VoteShare -}}"></meter>
+            <div class="poll-vote-summary">
+                {{- if isNil $pollOption.VotesCount }}
+                Results not yet published.
+                {{- else }}
+                {{- with deref $pollOption.VotesCount }}
+                <span class="poll-vote-share">{{- $pollOption.VoteShareStr -}}&#37;</span>
+                <span class="sr-only">,</span>
+                <span class="poll-vote-count">{{- template "votes" . -}}</span>
+                {{- end }}
+                {{- end }}
+            </div>
+        </li>
+    {{- end }}
+    </ul>
+</figure>
+{{- end }}

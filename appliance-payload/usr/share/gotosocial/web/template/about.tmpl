@@ -1,0 +1,224 @@
+{{- /*
+// GoToSocial
+// Copyright (C) GoToSocial Authors admin@gotosocial.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/ -}}
+
+{{- define "description" -}}
+{{- if .instance.Description }}
+{{ .instance.Description | noescape }}
+{{- else }}
+<p>No description has yet been set for this instance.</p>
+{{- end }}
+{{- end -}}
+
+{{- define "termsAndConditions" -}}
+{{- if .instance.Terms }}
+{{ .instance.Terms | noescape }}
+{{- else }}
+<p>No terms and conditions have yet been set for this instance.</p>
+{{- end }}
+{{- end -}}
+
+{{- define "languages" -}}
+{{- if .languages }}
+<p>This instance prefers the following languages:</p>
+<ol>
+    {{- range .languages }}
+    <li>{{- . -}}</li>
+    {{- end }}
+</ol>
+{{- else }}
+<p>No preferred languages have yet been set for this instance.</p> 
+{{- end }}
+{{- end -}}
+
+{{- define "rules" -}}
+{{- if .instance.Rules }}
+<p>This instance has the following rules:</p>
+<ol>
+    {{- range .instance.Rules }}
+    <li>{{- .Text -}}</li>
+    {{- end }}
+</ol>
+{{- else }}
+<p>No rules have yet been set for this instance.</p>
+{{- end }}
+{{- end -}}
+
+{{- define "customCSSLimits" -}}
+<a href="https://docs.gotosocial.org/en/stable/user_guide/settings/#custom-css" target="_blank" rel="noopener noreferrer">Custom CSS</a> is&nbsp;
+{{- if .instance.Configuration.Accounts.AllowCustomCSS -}}
+<b>enabled</b>
+{{- else -}}
+</b>disabled</b>
+{{- end -}}
+&nbsp;on account profiles.
+{{- end -}}
+
+{{- define "statusLimits" -}}
+Statuses can contain up to
+<b>{{- .instance.Configuration.Statuses.MaxCharacters }} characters</b>, and
+<b>{{- .instance.Configuration.Statuses.MaxMediaAttachments }} media attachments</b>.
+{{- end -}}
+
+{{- define "pollLimits" -}}
+Polls can have up to
+<b>{{- .instance.Configuration.Polls.MaxOptions }} options</b>, with
+<b>{{- .instance.Configuration.Polls.MaxCharactersPerOption }} characters per option</b>.
+{{- end -}}
+
+{{- define "profileLimits" -}}
+Profiles can have up to
+<b>{{- .instance.Configuration.Accounts.MaxProfileFields }} profile fields</b>.
+{{- end -}}
+
+{{- with . }}
+<main class="about">
+    <nav class="about-section" aria-labelledby="toc">
+        <h3 id="toc">Table of Contents</h3>
+        <div class="about-section-contents">
+            <ol>
+                <li><a href="#about">About {{ .instance.Title -}}</a></li>
+                <li><a href="#contact">Contact</a></li>
+                <li><a href="#features">Features</a></li>
+                <li><a href="#languages">Languages</a></li>
+                <li><a href="#signup">Register an Account on {{ .instance.Title -}}</a></li>
+                <li><a href="#rules">Rules</a></li>
+                <li><a href="#terms">Terms and Conditions</a></li>
+                <li><a href="#domain-permissions">Domain Permissions</a></li>
+            </ol>
+        </div>
+    </nav>
+    <section class="about-section" role="region" aria-labelledby="about">
+        <h3 id="about">About {{ .instance.Title -}}</h3>
+        <div class="about-section-contents">
+            {{- with . }}
+            {{- include "description" . | indent 3 }}
+            {{- end }}
+        </div>
+    </section>
+    <section class="about-section" role="region" aria-labelledby="contact">
+        <h3 id="contact">Admin Contact</h3>
+        <div class="about-section-contents">
+            {{- if .instance.ContactAccount }}
+            <a href="{{- .instance.ContactAccount.URL -}}" class="account-card">
+                <img class="avatar" src="{{- .instance.ContactAccount.Avatar -}}" alt=""/>
+                <h3>
+                    {{- if .instance.ContactAccount.DisplayName -}}
+                    {{- emojify .instance.ContactAccount.Emojis (escape .instance.ContactAccount.DisplayName) -}}
+                    {{- else -}}
+                    {{- .instance.ContactAccount.Username -}}
+                    {{- end -}}
+                </h3>
+                <span>@{{- .instance.ContactAccount.Username -}}</span>
+            </a>
+            {{- else }}
+            <p>This instance has not yet set a contact account.</p>
+            {{- end }}
+            {{- if .instance.Email }}
+            <p>Email: <a href="mailto:{{- .instance.Email -}}">{{- .instance.Email -}}</a></p>
+            {{- else }}
+            <p>This instance has not yet set a contact email address.</p>
+            {{- end }}
+        </div>
+    </section>
+    <section class="about-section" role="region" aria-labelledby="features">
+        <h3 id="features">Instance Features</h3>
+        <div class="about-section-contents">
+            <ul>
+                <li>{{- template "statusLimits" . -}}</li>
+                <li>{{- template "pollLimits" . -}}</li>
+                <li>{{- template "profileLimits" . -}}</li>
+                <li>{{- template "customCSSLimits" . -}}</li>
+            </ul>
+        </div>
+    </section>
+    <section class="about-section" role="region" aria-labelledby="languages">
+        <h3 id="languages">Languages</h3>
+        <div class="about-section-contents">
+            {{- with . }}
+            {{- include "languages" . | indent 3 }}
+            {{- end }}
+        </div>
+    </section>
+    {{- include "index_register.tmpl" . | indent 1 }}
+    <section class="about-section" role="region" aria-labelledby="rules">
+        <h3 id="rules">Instance Rules</h3>
+        <div class="about-section-contents">
+            {{- with . }}
+            {{- include "rules" . | indent 3 }}
+            {{- end }}
+        </div>
+    </section>
+    <section class="about-section" role="region" aria-labelledby="terms">
+        <h3 id="terms">Terms and Conditions</h3>
+        <div class="about-section-contents">
+            {{- with . }}
+            {{- include "termsAndConditions" . | indent 3 }}
+            {{- end }}
+        </div>
+    </section>
+    <section class="about-section" role="region" aria-labelledby="domain-permissions">
+        <h3 id="domain-permissions">Domain Permissions</h3>
+        <div class="about-section-contents">
+            <p>
+                ActivityPub instances federate with other instances by exchanging data with them over the network.
+                Exchanged data includes things like accounts, statuses, likes, boosts, and media attachments.
+            </p>
+            <p>
+                This exchange of data is open by default but can be <strong>blocked</strong> for instances
+                on specific domains via a domain block created by an instance admin.
+            </p>
+            <p>
+                Alternatively, if this instance is running in allowlist mode, exchange of data with remote
+                instances must be explicitly <strong>allowed</strong> via a domain allow entry.
+            </p>
+            <p>
+                For more information on domain blocks, domain allows, etc, see the following pages (all links open in a new tab):
+            </p>
+            <ul>
+                <li><a href="https://docs.gotosocial.org/en/stable/admin/federation_modes/" target="_blank" rel="noreferrer">Federation modes</a></li>
+                <li><a href="https://docs.gotosocial.org/en/stable/admin/domain_blocks/" target="_blank" rel="noreferrer">Domain blocks</a></li>
+                <li><a href="https://docs.gotosocial.org/en/stable/admin/domain_permission_subscriptions/" target="_blank" rel="noreferrer">Domain permission subscriptions</a></li>
+            </ul>
+            <h4>Blocked domains</h4>
+            <p>When a domain block entry is created on this instance:</p>
+            <ul>
+                <li>No new data from instances on the blocked domain will be created on this instance.</li>
+                <li>Interaction between this instance and blocked instances is cut off in both directions.</li>
+                <li>(In case of an exact match): Any existing data from blocked instances are deleted from the storage of this instance.</li>
+            </ul>
+            <p>
+                {{- if .blocklistExposed }}
+                <a href="/about/domain_blocks">View the list of domains blocked by this instance</a>
+                {{- else }}
+                This instance does not publicly share its list of blocked domains.
+                {{- end }}
+            </p>
+            <h4>Allowed domains</h4>
+            <p>When an admin adds an explicit domain allow entry, instances on the domain and its subdomains are allowed to federate with this instance.</p>
+            <p>
+                {{- if .allowlistExposed }}
+                <a href="/about/domain_allows">View the list of domains explicitly allowed by this instance</a>
+                {{- else }}
+                This instance does not publicly share its list of explicitly allowed domains.
+                {{- end }}
+            </p>
+        </div>
+    </section>
+</main>
+{{- end }}

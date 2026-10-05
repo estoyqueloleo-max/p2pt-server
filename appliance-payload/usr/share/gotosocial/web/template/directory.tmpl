@@ -1,0 +1,106 @@
+{{- /*
+// GoToSocial
+// Copyright (C) GoToSocial Authors admin@gotosocial.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/ -}}
+
+{{- with . }}
+<main class="directory">
+    <h1 id="directory">Account Directory</h1>
+    {{- if not .accounts }}
+    <p>No (more) accounts in the directory right now!</p>
+    {{- else }}
+    <p>Hello cherished visitor! Here's a list of accounts on this instance that have opted in to being discoverable in the directory (sorted by most recent post):</p>
+    <ol class="directory-list">
+        {{- range .accounts }}
+        <li class="directory-list-entry">
+            <address class="h-card">
+                <a
+                    href="{{- .URL -}}"
+                    title="Open profile"
+                    class="u-url u-uid"
+                >
+                    <picture
+                        class="header"
+                        aria-hidden="true"
+                    >
+                        {{- if .HeaderAttachment }}
+                        <source
+                            srcset="{{- .HeaderStatic -}}"
+                            type="{{- .HeaderAttachment.PreviewMIMEType -}}"
+                            media="(prefers-reduced-motion: reduce)"
+                        />
+                        {{- end }}
+                        <img
+                            src="{{- .Header -}}"
+                            alt="Header for {{ .Username -}}"
+                            title="Header for {{ .Username -}}"
+                            class="u-photo"
+                        >
+                    </picture>
+                    <picture
+                        class="avatar"
+                        aria-hidden="true"
+                    >
+                        {{- if .AvatarAttachment }}
+                        <source
+                            srcset="{{- .AvatarStatic -}}"
+                            type="{{- .AvatarAttachment.PreviewMIMEType -}}"
+                            media="(prefers-reduced-motion: reduce)"
+                        />
+                        {{- end }}
+                        <img
+                            src="{{- .Avatar -}}"
+                            alt="Avatar for {{ .Username -}}"
+                            title="Avatar for {{ .Username -}}"
+                            class="u-photo"
+                        >
+                    </picture>
+                    <div class="strap">
+                        <span class="displayname text-cutoff p-name">
+                            {{- if .DisplayName -}}
+                            {{- emojify .Emojis (escape .DisplayName) -}}
+                            {{- else -}}
+                            {{- .Username -}}
+                            {{- end -}}
+                        </span>
+                        <span class="sr-only">,</span>
+                        <span class="username text-cutoff p-nickname">@{{- .Acct -}}</span>
+                    </div>
+                    <span class="sr-only">(open profile)</span>
+                </a>
+                {{- if .Note }}
+                <div class="text-cutoff note p-note">
+                    {{ emojify .Emojis (noescape .Note) }}
+                </div>
+                {{- end }}
+            </address>
+        </li>
+        {{- end }}
+    </ol>
+    {{- end }}
+    {{- if .accounts_next }}
+    <nav class="backnextlinks">
+        {{- if .accounts_prev }}
+        <a href="{{- .accounts_prev -}}" class="prev">Previous page</a>
+        {{- end }}
+        {{- if and .accounts_next (eq 40 (len .accounts)) }}
+        <a href="{{- .accounts_next -}}" class="next">Next page</a>
+        {{- end }}
+    </nav>
+    {{- end }}
+</main>
+{{- end }}

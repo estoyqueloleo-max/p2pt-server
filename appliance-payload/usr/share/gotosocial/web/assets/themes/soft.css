@@ -1,0 +1,153 @@
+/*
+  theme-title: Soft
+  theme-description: Pastel pink and blue with dark magenta trim
+*/
+
+/* Use light code highlights. */
+@import url("../dist/_prism-light.css");
+
+:root {
+  /* Define our palette */
+  --soft-pink: rgb(255, 199, 234);
+  --soft-pink-translucent: rgb(255, 199, 234, 30%);
+  --soft-lilac: #D8B4F8;
+  --soft-lilac-translucent: rgb(216, 180, 248, 30%);
+  --soft-blue: #d6f1ff;
+
+  /* Override */
+  --blue1: #7f16de;
+  --blue2: #7514cc;
+  --blue3: #6b12ba;
+  --orange2: var(--blue1);
+  --br: 0.8rem;
+  --br-inner: 0.4rem; 
+  /* Use hardcoded grey as gray get re-styled in light mode */
+  --white1: #fafaff;
+  --gray1: #2a2b2f;
+  --gray2: #35363b;
+  --gray3: #45464e;
+  --gray8: #696a75;
+
+  /* Basic page styling (background + foreground) */
+  --bg: var(--soft-pink);
+  --bg-accent: var(--soft-pink-translucent);
+  --fg: var(--gray1);
+  --fg-reduced: var(--gray3);
+
+  /* Profile page styling (light) */
+  --profile-bg: var(--soft-pink-translucent);
+
+  /* Statuses */
+  --status-bg: var(--soft-pink-translucent);
+  --status-focus-bg: var(--soft-pink-translucent);
+  --status-info-bg: var(--soft-lilac-translucent);
+  --status-focus-info-bg: var(--soft-lilac-translucent);
+
+  /* Boot-on */
+  --button-fg: var(--white1);
+
+  /* Used around statuses + other items */
+  --boxshadow-border: 0.08rem solid var(--gray8);
+}
+
+/* Main page background */
+body {
+  background: linear-gradient(
+    -90deg,
+    var(--soft-blue),
+    var(--soft-pink),
+    white,
+    var(--soft-pink),
+    var(--soft-blue)
+  );
+}
+
+/* Scroll bar */
+html, body {
+  scrollbar-color: var(--orange2) var(--soft-pink);
+}
+
+/* Header card */
+.profile .profile-header {
+  border: var(--boxshadow-border);
+}
+
+/* Role and bot badge borders */
+.profile .profile-header .basic-info .namerole .role,
+.profile .profile-header .basic-info .namerole .bot-username-wrapper .bot-legend-wrapper {
+  border: var(--boxshadow-border);
+}
+
+/* About + Pinned posts headers */
+.profile .col-header {
+  border: var(--boxshadow-border);
+}
+
+.profile .about-user .col-header {
+  margin-bottom: initial;
+  border-bottom: none;
+  border-top: var(--boxshadow-border);
+  border-left: var(--boxshadow-border);
+  border-right: var(--boxshadow-border);
+}
+
+/* Profile fields + bio */
+.profile .about-user .fields {
+  border-left: var(--boxshadow-border);
+  border-right: var(--boxshadow-border);
+}
+.profile .about-user .fields .field {
+  border-bottom: 0.1rem dashed var(--blue3);
+}
+.profile .about-user .fields .field:first-child {
+  border-top: 0.1rem dashed var(--blue3);
+}
+.profile .about-user .bio {
+  border-left: var(--boxshadow-border);
+  border-right: var(--boxshadow-border);
+}
+.profile .about-user .accountstats {
+  background: var(--soft-lilac-translucent);
+  border-bottom: var(--boxshadow-border);
+  border-left: var(--boxshadow-border);
+  border-right: var(--boxshadow-border);
+  border-bottom-left-radius: var(--br);
+  border-bottom-right-radius: var(--br);
+}
+
+/* Status media */
+.status .media .media-wrapper {
+  border: 0.08rem solid var(--blue3);
+}
+.status .media .media-wrapper details .unknown-attachment .placeholder {
+  color: var(--blue2);
+}
+.status .media .media-wrapper details video.plyr-video {
+  background: var(--soft-pink-translucent);
+}
+
+/* Status polls */
+.status .text .poll {
+  background-color: var(--soft-lilac-translucent);
+}
+.status .text .poll .poll-info {
+  background: var(--bg);
+}
+
+/* Code snippets */
+pre, pre[class*="language-"],
+code, code[class*="language-"] {
+	background-color: white;
+  color: var(--gray1);
+}
+
+/* Block quotes */
+blockquote {
+	background-color: var(--soft-lilac-translucent);
+}
+
+/* Status info dropdown content */
+.status.expanded .status-info .status-stats .stats-more-info-content,
+.status .status-info .status-stats .stats-more-info-content {
+  background: var(--soft-pink);
+}

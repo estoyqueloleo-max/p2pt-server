@@ -1,0 +1,48 @@
+{{- /*
+// GoToSocial
+// Copyright (C) GoToSocial Authors admin@gotosocial.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/ -}}
+
+{{- with . }}
+<main>
+    <section>
+        <h1>Instance Allowlist</h1>
+        <p>
+            The following list of domains has been explicitly allowed by the administrator(s) of this instance.
+        </p>
+        <p>
+            This extends to subdomains, so an allowlist entry for domain 'example.com' includes domain 'social.example.com' etc as well.
+        </p>
+        <div class="list domain-perm-list">
+            <div class="header entry">
+                <div class="domain">Domain</div>
+                <div class="public_comment">Public comment</div>
+            </div>
+            {{- range .allowlist }}
+            <div class="entry" id="{{- .Domain -}}">
+                <div class="domain">
+                    <a class="text-cutoff" href="#{{- .Domain -}}" title="{{- .Domain -}}">{{- .Domain -}}</a>
+                </div>
+                <div class="public_comment">
+                    <p>{{- .Comment -}}</p>
+                </div>
+            </div>
+            {{- end }}
+        </div>
+    </section>
+</main>
+{{- end }}

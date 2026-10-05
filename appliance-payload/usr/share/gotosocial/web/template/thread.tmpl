@@ -1,0 +1,96 @@
+{{- /*
+// GoToSocial
+// Copyright (C) GoToSocial Authors admin@gotosocial.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/ -}}
+
+{{- define "repliesSummary" -}}
+    {{- if .context.ThreadRepliesShown -}}
+        {{- if .context.ThreadRepliesHidden -}}
+            {{- if eq .context.ThreadRepliesShown 1 -}}
+                {{- /* Some replies are hidden. */ -}}
+                {{ .context.ThreadRepliesShown }} visible reply
+            {{- else if gt .context.ThreadRepliesShown 1 -}}
+                {{ .context.ThreadRepliesShown }} visible replies
+            {{- end -}}
+                ; {{ .context.ThreadRepliesHidden }} more {{ if eq .context.ThreadRepliesHidden 1 }}reply{{ else }}replies{{ end }} hidden or not public
+        {{- else -}}
+            {{- /* No hidden replies. */ -}}
+            {{- if eq .context.ThreadReplies 1 -}}
+                {{ .context.ThreadReplies }} reply
+            {{- else if gt .context.ThreadReplies 1 -}}
+                {{ .context.ThreadReplies }} replies
+            {{- end -}}
+        {{- end -}}
+    {{- else -}}
+        {{- .context.ThreadRepliesHidden }} {{ if eq .context.ThreadRepliesHidden 1 }}reply{{ else }}replies{{ end }} hidden or not public
+    {{- end -}}
+{{- end -}}
+
+{{- define "threadSummary" -}}
+    {{- if .context.ThreadHidden -}}
+        {{- if eq .context.ThreadShown 1 -}}
+            Single visible post
+        {{- else if gt .context.ThreadShown 1 -}}
+            Thread of {{ .context.ThreadShown }} visible posts
+        {{- end -}}
+            ; {{ .context.ThreadHidden }} more {{ if eq .context.ThreadHidden 1 }}post{{ else }}posts{{ end }} hidden or not public
+    {{- else -}}
+        {{- /* No hidden posts */ -}}
+        {{- if eq .context.ThreadLength 1 -}}
+            Single post
+        {{- else if gt .context.ThreadLength 1 -}}
+            Thread of {{ .context.ThreadLength }} posts
+        {{- end -}}
+    {{- end -}}
+{{- end -}}
+
+{{- define "repliesStart" -}}
+{{- with . }}
+</section>
+<section class="thread thread-replies" aria-labelledby="replies" open>
+    <div class="col-header wrapping replies{{- if not .context.ThreadRepliesShown }} hidden-only{{- end -}}">
+        <h2 id="replies">{{- template "repliesSummary" . -}}</h2>
+        <a href="#thread-summary">back to top</a>
+    </div>
+{{- end }}
+{{- end -}}
+
+{{- with . }}
+<main class="thread-wrapper" data-nosnippet>
+    <section class="thread thread-main" aria-labelledby="thread-summary">
+        <div class="col-header wrapping">
+            <h2 id="thread-summary">{{- template "threadSummary" . -}}</h2>
+            {{- /* Include this div so that javascript can be used to toggle show/hide for all entries in a thread */}}
+            <div aria-hidden="true" class="hidden" id="thread-show-hide-all-toggle-wrapper"></div>
+            {{- if .context.ThreadRepliesShown }}
+            <a href="#replies">jump to replies</a>
+            {{- end }}
+        </div>
+        {{- range $status := .context.Statuses }}
+        <article
+            class="status{{- if $status.ThreadContextStatus }} expanded{{- end -}}{{- if $status.Indent }} indent-{{ $status.Indent }}{{- end -}}"
+            {{- includeAttr "status_attributes.tmpl" $status | indentAttr 3 }}
+        >
+            {{- include "status.tmpl" $status | indent 3 }}
+        </article>
+        {{- if and $status.ThreadLastMain $.context.ThreadReplies }}
+        {{- include "repliesStart" $ | indent 1 }}
+        {{- end }}
+        {{- end }}
+    </section>
+</main>
+{{- end }}
