@@ -5,6 +5,20 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/dist"
 mkdir -p "$OUTPUT_DIR"
 
+# 0. Asegurar dependencias del appliance (GoToSocial ARMv6)
+GTS_VERSION="${GTS_VERSION:-0.22.1}"
+GTS_BIN="${SCRIPT_DIR}/appliance-payload/usr/bin/gotosocial"
+if [ ! -f "$GTS_BIN" ]; then
+    echo "⬇️  Descargando GoToSocial v${GTS_VERSION} (Linux ARMv6 para Appliance)..."
+    mkdir -p "$(dirname "$GTS_BIN")"
+    TMP_GTS_TAR=$(mktemp /tmp/gts_XXXXXX.tar.gz)
+    curl -fsSL "https://github.com/superseriousbusiness/gotosocial/releases/download/v${GTS_VERSION}/gotosocial_${GTS_VERSION}_linux_armv6.tar.gz" -o "$TMP_GTS_TAR"
+    tar -xzf "$TMP_GTS_TAR" -C "$(dirname "$GTS_BIN")" gotosocial
+    rm -f "$TMP_GTS_TAR"
+    chmod +x "$GTS_BIN"
+    echo "✔ GoToSocial v${GTS_VERSION} descargado en appliance-payload/usr/bin/gotosocial"
+fi
+
 echo "🔨 Building P2PT / Pingo Standalone Server Binaries..."
 
 # 1. Linux armhf / ARMv6 (Raspberry Pi Zero / Zero W / Pi 1)
