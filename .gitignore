@@ -3,4 +3,3 @@ dist/
 *.env.*
 pingo-server
 p2pt-server
-appliance-payload/usr/bin/gotosocial
