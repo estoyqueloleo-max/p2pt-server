@@ -60,6 +60,9 @@ type Config struct {
 	GitRepo        string
 	EnableMastodon bool
 	MastodonTarget string
+	DDNSApplianceID string
+	DDNSSecretToken string
+	DDNSHubEndpoint string
 	mu             sync.RWMutex
 }
 
@@ -701,6 +704,9 @@ func main() {
 		GitRepo:          *gitRepo,
 		EnableMastodon:   *enableMastodon,
 		MastodonTarget:   *mastodonTarget,
+		DDNSApplianceID:  os.Getenv("DDNS_APPLIANCE_ID"),
+		DDNSSecretToken:  os.Getenv("DDNS_SECRET_TOKEN"),
+		DDNSHubEndpoint:  os.Getenv("DDNS_HUB_ENDPOINT"),
 	}
 
 	// Interactive Wizard if requested
@@ -759,6 +765,16 @@ func main() {
 	if cfg.DuckDomain != "" && cfg.DuckToken != "" {
 		log.Printf("[DuckDNS] Activando sincronización periódica para '%s'...", formatFullDomain(cfg.DuckDomain))
 		duckMgr.StartBackgroundSync()
+	}
+
+	// Initialize Cloud Hub DDNS Manager (klitosan.com)
+	cloudHubMgr := NewCloudHubDDNSManager(cfg.DDNSApplianceID, cfg.DDNSSecretToken, cfg.DDNSHubEndpoint, func(subdomain, currentIP string) {
+		cfg.SetPublicIP(subdomain)
+		log.Printf("[CloudHub DDNS Callback] Host actualizado a: %s (IP: %s)", subdomain, currentIP)
+	})
+	if cfg.DDNSApplianceID != "" && cfg.DDNSSecretToken != "" {
+		log.Printf("[CloudHub DDNS] Activando sincronización periódica con Cloud Hub para '%s'...", cfg.DDNSApplianceID)
+		cloudHubMgr.StartBackgroundSync()
 	}
 
 	// 1. Initialize Pion TURN / STUN Server
@@ -941,6 +957,7 @@ func main() {
 			"config":        clientCfg,
 			"upnp":          upnpMgr.GetReport(),
 			"duckdns":       duckMgr.GetStatus(),
+			"cloudhub_ddns": cloudHubMgr.GetStatus(),
 			"mastodon": func() interface{} {
 				if gtsMgr != nil {
 					return gtsMgr.GetStatus(r.Context())
