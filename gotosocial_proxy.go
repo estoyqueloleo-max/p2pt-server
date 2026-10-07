@@ -57,7 +57,9 @@ func NewGoToSocialManager(cfg *Config) (*GoToSocialManager, error) {
 		// Set proper forwarding headers for ActivityPub & Mastodon Client API
 		publicHost := cfg.GetPublicIP()
 		proto := "http"
-		if cfg.EnableTLS {
+		if incomingProto := req.Header.Get("X-Forwarded-Proto"); incomingProto != "" {
+			proto = incomingProto
+		} else if cfg.EnableTLS || req.TLS != nil || (!strings.HasPrefix(publicHost, "192.168.") && !strings.HasPrefix(publicHost, "127.") && !strings.HasPrefix(publicHost, "10.") && strings.Contains(publicHost, ".")) {
 			proto = "https"
 		}
 
@@ -208,7 +210,7 @@ func EnsureGoToSocialConfigFile(cfg *Config, targetPath string) error {
 		publicHost = fmt.Sprintf("%s:%d", publicHost, cfg.HTTPPort)
 	}
 	proto := "http"
-	if cfg.EnableTLS {
+	if cfg.EnableTLS || (!strings.HasPrefix(publicHost, "192.168.") && !strings.HasPrefix(publicHost, "127.") && !strings.HasPrefix(publicHost, "10.") && strings.Contains(publicHost, ".")) {
 		proto = "https"
 	}
 	port := 8080
