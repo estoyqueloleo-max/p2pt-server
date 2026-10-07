@@ -1445,7 +1445,7 @@ func main() {
 				authMgr.RenderLoginPage(w, r, "")
 				return
 			}
-			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, tracker, turnMonitor, gitServer)
+			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, cloudHubMgr, tracker, turnMonitor, gitServer)
 			return
 		}
 
@@ -1660,7 +1660,7 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 	fmt.Println("==================================================================")
 }
 
-func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor, gitServer *GitServer) {
+func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, cloudHubMgr *CloudHubDDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor, gitServer *GitServer) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	currentWiFiSSID := ""
@@ -1858,20 +1858,65 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 	qrPNG, _ := qrcode.Encode(pairURL, qrcode.Medium, 256)
 	qrBase64 := base64.StdEncoding.EncodeToString(qrPNG)
 
-	upnpBadgeClass := "badge-error"
-	upnpBadgeText := "UPnP No Detectado"
-	if upnpReport.Active {
-		if upnpReport.HasCGNAT {
-			upnpBadgeClass = "badge-warning"
-			upnpBadgeText = "UPnP Activo &bull; CGNAT Detectado"
+	hubStatus := CloudHubDDNSStatus{Enabled: false}
+	if cloudHubMgr != nil {
+		hubStatus = cloudHubMgr.GetStatus()
+	}
+
+	_ = upnpReport // reservado para compatibilidad
+
+	activeDomain := cfg.GetPublicIP()
+	if hubStatus.Subdomain != "" {
+		activeDomain = hubStatus.Subdomain
+	}
+	applianceID := cfg.DDNSApplianceID
+	if applianceID == "" {
+		applianceID = "No asignado (Modo local)"
+	}
+	hubPublicIP := hubStatus.CurrentIP
+	if hubPublicIP == "" {
+		hubPublicIP = cfg.GetPublicIP()
+	}
+	hubEndpoint := hubStatus.HubEndpoint
+	if hubEndpoint == "" {
+		hubEndpoint = cfg.DDNSHubEndpoint
+	}
+	if hubEndpoint == "" {
+		hubEndpoint = "https://web.appliance.klitosan.com"
+	}
+
+	hubCardBadgeClass := "badge-muted"
+	hubCardBadgeText := "Sin Conexión Cloud Hub"
+	if hubStatus.Enabled {
+		if hubStatus.LastSuccess {
+			hubCardBadgeClass = "badge-success"
+			hubCardBadgeText = "SSL / HTTPS Activo"
 		} else {
-			upnpBadgeClass = "badge-success"
-			upnpBadgeText = "UPnP Activo &bull; Puertos Mapeados"
+			hubCardBadgeClass = "badge-warning"
+			hubCardBadgeText = "Sincronizando..."
 		}
+	} else if cfg.DDNSApplianceID != "" {
+		hubCardBadgeClass = "badge-success"
+		hubCardBadgeText = "SSL / HTTPS Activo"
+	}
+
+	cloudHubBadgeClass := "badge-muted"
+	cloudHubBadgeText := "Cloud Hub DDNS Inactivo"
+	if hubStatus.Enabled {
+		if hubStatus.LastSuccess {
+			cloudHubBadgeClass = "badge-success"
+			cloudHubBadgeText = "Cloud Hub: " + hubStatus.Subdomain
+		} else {
+			cloudHubBadgeClass = "badge-warning"
+			cloudHubBadgeText = "Cloud Hub Conectando..."
+		}
+	} else if cfg.DDNSApplianceID != "" {
+		cloudHubBadgeClass = "badge-success"
+		cloudHubBadgeText = "Appliance: " + cfg.DDNSApplianceID
 	}
 
 	duckBadgeClass := "badge-muted"
-	duckBadgeText := "DuckDNS Inactivo"
+	duckBadgeText := "DuckDNS Fallback Inactivo"
 	if duckStatus.Enabled {
 		if duckStatus.LastSuccess {
 			duckBadgeClass = "badge-success"
@@ -1880,6 +1925,11 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 			duckBadgeClass = "badge-warning"
 			duckBadgeText = "DuckDNS Error"
 		}
+	}
+
+	testHTTPSURL := fmt.Sprintf("https://%s/", activeDomain)
+	if cfg.HTTPPort != 443 {
+		testHTTPSURL = fmt.Sprintf("https://%s:%d/", activeDomain, cfg.HTTPPort)
 	}
 
 	topicInfoHash := DeriveInfoHash(cfg.TopicID)
@@ -2072,7 +2122,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             <div class="badges-row">
                 <div class="badge badge-success"><span class="dot"></span> Señalización & Relé Activos</div>
                 <div class="badge badge-success"><span class="dot"></span> mDNS: pingo.local</div>
-                <div class="badge %s" id="upnp-badge"><span class="dot"></span> %s</div>
+                <div class="badge %s" id="hub-badge"><span class="dot"></span> %s</div>
                 <div class="badge %s" id="duck-badge"><span class="dot"></span> %s</div>
             </div>
         </div>
@@ -2116,72 +2166,94 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
         <div class="card" style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%%, rgba(15, 23, 42, 0.85) 100%%); border: 1px solid rgba(99, 102, 241, 0.3);">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                 <h3 style="margin: 0; color: #818cf8;">🚀 Asistente de Configuración Rápida</h3>
-                <span style="font-size: 0.8rem; color: var(--text-muted);">Nodo Autónomo P2P</span>
+                <span style="font-size: 0.8rem; color: var(--text-muted);">Nodo Autónomo P2P & Fediverse</span>
             </div>
             <div style="display: flex; gap: 8px; font-size: 0.82rem; flex-wrap: wrap;">
                 <div style="flex: 1; min-width: 140px; background: rgba(16,185,129,0.15); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #10b981;">
-                    <b>✅ 1. Wi-Fi & Red</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Hecho en el portal cautivo</span>
+                    <b>✅ 1. Red & Conectividad</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Wi-Fi / Ethernet operativo</span>
                 </div>
-                <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #eab308;">
-                    <b>2. DuckDNS & TLS</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Dominio público gratuito</span>
+                <div style="flex: 1; min-width: 140px; background: rgba(56,189,248,0.15); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #38bdf8;">
+                    <b>🛡️ 2. Cloud Hub & HTTPS</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Dominio global seguro</span>
                 </div>
                 <div style="flex: 1; min-width: 140px; background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 6px; border-left: 3px solid #10b981;">
-                    <b>3. Vincular App</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Escanear QR o enlace</span>
+                    <b>3. Vincular App & Red</b><br><span style="color:var(--text-muted); font-size:0.75rem;">Escanear QR o enlace</span>
                 </div>
             </div>
         </div>
 
-                <div class="card" style="border: 1px solid rgba(234, 179, 8, 0.4); background: rgba(234, 179, 8, 0.03);">
+        <!-- 1. Cloud Hub DDNS & HTTPS (Principal) -->
+        <div class="card" style="border: 1px solid rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.03);">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <h3 style="margin: 0;">
-                    <span>🦆 2. Dominio Global & Acceso desde Fuera de Casa (DuckDNS)</span>
+                <h3 style="margin: 0; color: #38bdf8;">
+                    <span>🛡️ Dominio Cloud Hub & Certificado HTTPS (Principal)</span>
                 </h3>
-                <span class="badge badge-warning" style="font-size:0.75rem;">Opcional pero Recomendado</span>
+                <span class="badge %s" style="font-size:0.75rem;">%s</span>
             </div>
-            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 16px 0;">
-                DuckDNS te proporciona un dominio público gratuito (ej: <code>mi-nodo.duckdns.org</code>) para conectar a tu Raspberry Pi por <b>HTTPS/WSS</b> desde la calle o red móvil sin pagar nada ni configurar IPs dinámicas.
+            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 14px 0;">
+                Dominio gestionado global para el nodo con certificado seguro TLS/HTTPS, permitiendo federación con Mastodon/GoToSocial y acceso seguro sin depender de puertos abiertos por UPnP.
             </p>
-
-            <!-- Guía Rápida por Pasos -->
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 16px;">
-                <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px; border-left: 3px solid #eab308; font-size: 0.84rem;">
-                    <b style="color:#fde047;">Paso 1: Entrar a DuckDNS</b>
-                    <p style="margin: 4px 0 6px 0; color: var(--text-muted); font-size: 0.78rem;">Inicia sesión gratis con Google o GitHub:</p>
-                    <a href="https://www.duckdns.org" target="_blank" class="btn btn-secondary" style="font-size: 0.75rem; padding: 4px 8px; display: inline-block;">
-                        ↗️ Abrir DuckDNS.org
-                    </a>
+            <div class="grid" style="margin-bottom: 12px;">
+                <div class="stat">
+                    <div class="stat-label">Dominio Público Activo</div>
+                    <div class="stat-val" style="color: #38bdf8; font-size: 1rem; word-break: break-all;">%s</div>
                 </div>
-                <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px; border-left: 3px solid #3b82f6; font-size: 0.84rem;">
-                    <b style="color:#93c5fd;">Paso 2: Crear tu Subdominio</b>
-                    <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 0.78rem;">En la casilla <i>domains</i>, escribe un nombre (ej. <code>pingo-casa</code>) y pulsa <i>add domain</i>.</p>
+                <div class="stat">
+                    <div class="stat-label">Identificador Appliance</div>
+                    <div class="stat-val" style="font-size: 1rem; color: #a5b4fc;">%s</div>
                 </div>
-                <div style="background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px; border-left: 3px solid #10b981; font-size: 0.84rem;">
-                    <b style="color:#6ee7b7;">Paso 3: Copiar tu Token</b>
-                    <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 0.78rem;">Copia el <i>token</i> alfanumérico que aparece arriba en la barra de DuckDNS.</p>
+                <div class="stat">
+                    <div class="stat-label">IP Pública Sincronizada</div>
+                    <div class="stat-val" style="font-size: 1rem; color: #6ee7b7;">%s</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">Gateway / Worker Hub</div>
+                    <div class="stat-val" style="font-size: 0.85rem; color: var(--text-muted); word-break: break-all;">%s</div>
                 </div>
             </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.25); padding: 10px 14px; border-radius: 8px; flex-wrap: wrap; gap: 8px;">
+                <div style="font-size: 0.82rem; color: var(--text-muted);">
+                    🔗 Administra tus dispositivos en la consola web: <a href="https://web.appliance.klitosan.com/" target="_blank" style="color: #38bdf8; text-decoration: underline;">web.appliance.klitosan.com</a>
+                </div>
+                <a href="%s" target="_blank" class="btn" style="padding: 6px 14px; font-size: 0.82rem;">
+                    🌐 Probar Acceso HTTPS
+                </a>
+            </div>
+        </div>
 
-            <!-- Formulario de Configuración -->
-            <div class="form-row" style="align-items: flex-end;">
-                <div class="form-group" style="flex: 1.5;">
-                    <label>Tu Subdominio Elegido</label>
-                    <div style="display: flex; align-items: center; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
-                        <input type="text" id="duck-domain-input" class="form-control" placeholder="ej. pingo-casa" value="%s" style="border: none; background: transparent;" oninput="cleanDuckDomain(this)">
-                        <span style="padding: 0 10px; color: var(--text-muted); font-size: 0.85rem; background: rgba(255,255,255,0.05); height: 100%%; display: flex; align-items: center; border-left: 1px solid var(--border);">.duckdns.org</span>
+        <!-- 2. Fallback DuckDNS (Secundario / Opcional) -->
+        <details class="card" style="border: 1px solid rgba(234, 179, 8, 0.25); background: rgba(234, 179, 8, 0.02); padding: 16px 20px;">
+            <summary style="cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: 600; outline: none; list-style: none;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span>🦆 Dominio DuckDNS (Alternativo / Fallback)</span>
+                    <span class="badge %s" style="font-size: 0.72rem;">%s</span>
+                </div>
+                <span style="font-size: 0.78rem; color: var(--text-muted);">Desplegar configuración ▾</span>
+            </summary>
+            <div style="margin-top: 14px;">
+                <p style="color: var(--text-muted); font-size: 0.86rem; margin: 0 0 14px 0;">
+                    Si no utilizas el Cloud Hub central, puedes mantener un subdominio gratuito en DuckDNS como enlace de respaldo o resolución secundaria.
+                </p>
+                <div class="form-row" style="align-items: flex-end;">
+                    <div class="form-group" style="flex: 1.5;">
+                        <label>Subdominio DuckDNS</label>
+                        <div style="display: flex; align-items: center; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;">
+                            <input type="text" id="duck-domain-input" class="form-control" placeholder="ej. pingo-casa" value="%s" style="border: none; background: transparent;" oninput="cleanDuckDomain(this)">
+                            <span style="padding: 0 10px; color: var(--text-muted); font-size: 0.85rem; background: rgba(255,255,255,0.05); height: 100%%; display: flex; align-items: center; border-left: 1px solid var(--border);">.duckdns.org</span>
+                        </div>
+                    </div>
+                    <div class="form-group" style="flex: 1.5;">
+                        <label>Token DuckDNS</label>
+                        <input type="password" id="duck-token-input" class="form-control" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="%s">
+                    </div>
+                    <div class="form-group" style="flex: 1; min-width: 150px;">
+                        <button type="button" id="save-duck-btn" onclick="saveDuckDNS()" class="btn btn-secondary" style="width: 100%%; padding: 9px; font-weight: bold; border-radius: 6px; cursor: pointer;">
+                            💾 Actualizar DuckDNS
+                        </button>
                     </div>
                 </div>
-                <div class="form-group" style="flex: 1.5;">
-                    <label>Tu Token Privado de DuckDNS</label>
-                    <input type="password" id="duck-token-input" class="form-control" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" value="%s">
-                </div>
-                <div class="form-group" style="flex: 1; min-width: 160px;">
-                    <button type="button" id="save-duck-btn" onclick="saveDuckDNS()" class="btn" style="width: 100%%; padding: 10px; font-weight: bold; background: #eab308; color: #000; border-radius: 6px; cursor: pointer;">
-                        🚀 Probar y Activar
-                    </button>
-                </div>
+                <div id="duck-alert" class="alert %s" style="display:%s;">%s</div>
             </div>
-            <div id="duck-alert" class="alert %s" style="display:%s;">%s</div>
-        </div>
+        </details>
 
         <div class="card">
             <h3>📊 Métricas del Servidor</h3>
@@ -2706,12 +2778,19 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
     </script>
 </body>
 </html>`,
-		upnpBadgeClass, upnpBadgeText,
+		cloudHubBadgeClass, cloudHubBadgeText,
 		duckBadgeClass, duckBadgeText,
 		qrBase64,
 		pairURL,
 		cfg.TopicID,
 		topicInfoHash,
+		hubCardBadgeClass, hubCardBadgeText,
+		activeDomain,
+		applianceID,
+		hubPublicIP,
+		hubEndpoint,
+		testHTTPSURL,
+		duckBadgeClass, duckBadgeText,
 		cfg.DuckDomain,
 		cfg.DuckToken,
 		map[bool]string{true: "alert-success", false: "alert-info"}[duckStatus.LastSuccess],
