@@ -1,0 +1,55 @@
+# Pingo Appliance — fly.toml para despliegue en Fly.io
+# Documentación: https://fly.io/docs/reference/configuration/
+
+app = "pingo-appliance"
+primary_region = "mad" # Madrid o la región más cercana (ej: cdg, lhr, mia)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  ENABLE_UPNP = "false"
+  ENABLE_MDNS = "false"
+  ENABLE_GIT = "true"
+  GIT_DIR = "/data/repos"
+
+[mounts]
+  source = "pingo_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+# Servicio Web (Dashboard, PeerJS Signaling, Git HTTP)
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "5s"
+
+  [[services.http_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "get"
+    path = "/healthz"
+    protocol = "http"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
