@@ -120,6 +120,27 @@ func TestAPI_ConfigPersistence(t *testing.T) {
 	if !bytes.Contains(content, []byte("DUCKDNS_DOMAIN=test-node")) {
 		t.Errorf("Saved env file does not contain DUCKDNS_DOMAIN: %s", string(content))
 	}
+	if !bytes.Contains(content, []byte("ENABLE_MASTODON=false")) {
+		t.Errorf("Saved env file does not contain ENABLE_MASTODON=false: %s", string(content))
+	}
 
-	t.Log("✅ Config persistence to .env verified successfully!")
+	// Test updating AdminPassword and EnableMastodon
+	cfg.AdminPassword = "new-secret-pass"
+	cfg.EnableMastodon = true
+	if err := SaveConfigToEnv(cfg); err != nil {
+		t.Fatalf("Failed to save updated config: %v", err)
+	}
+
+	updatedContent, err := os.ReadFile(tempEnv)
+	if err != nil {
+		t.Fatalf("Failed to read updated env file: %v", err)
+	}
+	if !bytes.Contains(updatedContent, []byte("ADMIN_PASSWORD=new-secret-pass")) {
+		t.Errorf("Updated env does not contain new ADMIN_PASSWORD: %s", string(updatedContent))
+	}
+	if !bytes.Contains(updatedContent, []byte("ENABLE_MASTODON=true")) {
+		t.Errorf("Updated env does not contain ENABLE_MASTODON=true: %s", string(updatedContent))
+	}
+
+	t.Log("✅ Config persistence for AdminPassword and EnableMastodon verified successfully!")
 }

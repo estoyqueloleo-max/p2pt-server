@@ -670,8 +670,12 @@ func main() {
 	if envGitRepo := os.Getenv("GIT_REPO"); envGitRepo != "" {
 		*gitRepo = envGitRepo
 	}
-	if envMastodon := os.Getenv("ENABLE_MASTODON"); envMastodon == "true" || envMastodon == "1" {
-		*enableMastodon = true
+	if envMastodon := os.Getenv("ENABLE_MASTODON"); envMastodon != "" {
+		if envMastodon == "true" || envMastodon == "1" {
+			*enableMastodon = true
+		} else if envMastodon == "false" || envMastodon == "0" {
+			*enableMastodon = false
+		}
 	}
 	if envMastodonTarget := os.Getenv("MASTODON_TARGET"); envMastodonTarget != "" {
 		*mastodonTarget = envMastodonTarget
@@ -1155,10 +1159,13 @@ func main() {
 			return
 		}
 		var payload struct {
-			DuckDomain string `json:"duck_domain"`
-			DuckToken  string `json:"duck_token"`
-			TopicID    string `json:"topic_id"`
-			UPnP       *bool  `json:"upnp"`
+			DuckDomain      string `json:"duck_domain"`
+			DuckToken       string `json:"duck_token"`
+			TopicID         string `json:"topic_id"`
+			UPnP            *bool  `json:"upnp"`
+			AdminPassword   string `json:"admin_password"`
+			CurrentPassword string `json:"current_password"`
+			EnableMastodon  *bool  `json:"enable_mastodon"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -1176,6 +1183,33 @@ func main() {
 		}
 		if payload.UPnP != nil {
 			cfg.EnableUPnP = *payload.UPnP
+		}
+		if payload.AdminPassword != "" {
+			newPass := strings.TrimSpace(payload.AdminPassword)
+			if len(newPass) < 4 {
+				http.Error(w, `{"error":"La contraseña de administrador debe tener al menos 4 caracteres"}`, http.StatusBadRequest)
+				return
+			}
+			if payload.CurrentPassword != "" && !authMgr.ValidatePassword(payload.CurrentPassword) {
+				http.Error(w, `{"error":"La contraseña actual es incorrecta"}`, http.StatusForbidden)
+				return
+			}
+			cfg.AdminPassword = newPass
+			authMgr.SetAdminPassword(newPass)
+			log.Printf("[Security] 🔑 Contraseña de administrador actualizada desde el Dashboard por %s", r.RemoteAddr)
+		}
+		if payload.EnableMastodon != nil {
+			cfg.EnableMastodon = *payload.EnableMastodon
+			log.Printf("[Config] 🐘 Estado de GoToSocial / Mastodon actualizado: enabled=%t", cfg.EnableMastodon)
+			go func(enabled bool) {
+				if _, err := exec.LookPath("rc-service"); err == nil {
+					action := "stop"
+					if enabled {
+						action = "start"
+					}
+					_ = exec.Command("rc-service", "gotosocial", action).Run()
+				}
+			}(cfg.EnableMastodon)
 		}
 		_ = SaveConfigToEnv(cfg)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2255,6 +2289,60 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             </div>
         </details>
 
+        <!-- 3. Federación Mastodon & GoToSocial -->
+        <div class="card" style="border: 1px solid rgba(168, 85, 247, 0.35); background: rgba(168, 85, 247, 0.03);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h3 style="margin: 0; color: #c084fc;">
+                    <span>🐘 Federación Mastodon & GoToSocial</span>
+                </h3>
+                <span id="mastodon-badge" class="badge" style="font-size:0.75rem;"></span>
+            </div>
+            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 14px 0;">
+                Permite que el nodo federé publicaciones y perfiles con el Fediverse mediante GoToSocial. Cuando está desactivado, el servicio local se apaga ahorrando memoria RAM y recursos en la Raspberry Pi.
+            </p>
+            <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; background:rgba(0,0,0,0.25); padding:12px 16px; border-radius:8px;">
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <label style="cursor:pointer; display:flex; align-items:center; gap:8px; font-weight:600; font-size:0.95rem;">
+                        <input type="checkbox" id="mastodon-toggle-checkbox" style="width:18px; height:18px; cursor:pointer;">
+                        <span>Activar servidor GoToSocial / Mastodon</span>
+                    </label>
+                </div>
+                <button type="button" id="save-mastodon-btn" onclick="saveMastodonToggle()" class="btn" style="padding:7px 16px; font-size:0.85rem;">
+                    💾 Aplicar Cambio
+                </button>
+            </div>
+            <div id="mastodon-alert" class="alert alert-success" style="display:none; margin-top:10px;"></div>
+        </div>
+
+        <!-- 4. Seguridad & Contraseña de Administrador -->
+        <div class="card" style="border: 1px solid rgba(244, 63, 94, 0.35); background: rgba(244, 63, 94, 0.02);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h3 style="margin: 0; color: #fb7185;">
+                    <span>🔑 Seguridad & Contraseña del Appliance</span>
+                </h3>
+                <span class="badge badge-info" style="font-size:0.75rem;">Protegido</span>
+            </div>
+            <p style="color: var(--text-muted); font-size: 0.88rem; margin: 0 0 14px 0;">
+                Modifica la contraseña de acceso de administrador para este Dashboard y las APIs de gestión. El cambio se persistirá en la MicroSD.
+            </p>
+            <div class="form-row" style="align-items: flex-end;">
+                <div class="form-group" style="flex: 1.2;">
+                    <label>Contraseña Actual (opcional)</label>
+                    <input type="password" id="admin-current-pass" class="form-control" placeholder="Contraseña actual">
+                </div>
+                <div class="form-group" style="flex: 1.2;">
+                    <label>Nueva Contraseña (mínimo 4 caracteres)</label>
+                    <input type="password" id="admin-new-pass" class="form-control" placeholder="Nueva contraseña">
+                </div>
+                <div class="form-group" style="flex: 1; min-width: 140px;">
+                    <button type="button" id="save-admin-pass-btn" onclick="saveAdminPassword()" class="btn btn-secondary" style="width: 100%%; padding: 9px; font-weight: bold; border-radius: 6px; cursor: pointer; background: #e11d48; border-color: #be123c;">
+                        🔒 Cambiar Clave
+                    </button>
+                </div>
+            </div>
+            <div id="admin-pass-alert" class="alert" style="display:none; margin-top:10px;"></div>
+        </div>
+
         <div class="card">
             <h3>📊 Métricas del Servidor</h3>
             <div class="grid">
@@ -2645,6 +2733,153 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 btn.innerText = "🚀 Probar y Activar";
             }
         }
+
+        async function saveMastodonToggle() {
+            const checkbox = document.getElementById("mastodon-toggle-checkbox");
+            const btn = document.getElementById("save-mastodon-btn");
+            const alertBox = document.getElementById("mastodon-alert");
+            const enabled = checkbox ? checkbox.checked : false;
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "⏳ Aplicando...";
+            }
+            if (alertBox) alertBox.style.display = "none";
+
+            try {
+                const sessionToken = localStorage.getItem('pingo_session_token') || '';
+                const fetchHeaders = { "Content-Type": "application/json" };
+                if (sessionToken) fetchHeaders['Authorization'] = 'Bearer ' + sessionToken;
+
+                const res = await fetch("/api/config", {
+                    method: "POST",
+                    credentials: 'include',
+                    headers: fetchHeaders,
+                    body: JSON.stringify({ enable_mastodon: enabled })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (alertBox) {
+                        alertBox.style.display = "block";
+                        alertBox.className = "alert alert-success";
+                        alertBox.innerText = enabled ? "🐘 GoToSocial / Mastodon activado con éxito." : "⏹️ GoToSocial / Mastodon desactivado con éxito.";
+                    }
+                    setTimeout(() => window.location.reload(), 1500);
+                } else {
+                    if (alertBox) {
+                        alertBox.style.display = "block";
+                        alertBox.className = "alert alert-warning";
+                        alertBox.innerText = "⚠️ Error: " + (data.error || "No se pudo actualizar GoToSocial.");
+                    }
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerText = "💾 Aplicar Cambio";
+                    }
+                }
+            } catch (err) {
+                if (alertBox) {
+                    alertBox.style.display = "block";
+                    alertBox.className = "alert alert-warning";
+                    alertBox.innerText = "Error: " + err.message;
+                }
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = "💾 Aplicar Cambio";
+                }
+            }
+        }
+
+        async function saveAdminPassword() {
+            const currentPassInput = document.getElementById("admin-current-pass");
+            const newPassInput = document.getElementById("admin-new-pass");
+            const btn = document.getElementById("save-admin-pass-btn");
+            const alertBox = document.getElementById("admin-pass-alert");
+
+            const current_password = currentPassInput ? currentPassInput.value.trim() : "";
+            const admin_password = newPassInput ? newPassInput.value.trim() : "";
+
+            if (!admin_password || admin_password.length < 4) {
+                if (alertBox) {
+                    alertBox.style.display = "block";
+                    alertBox.className = "alert alert-warning";
+                    alertBox.innerText = "⚠️ La nueva contraseña debe tener al menos 4 caracteres.";
+                }
+                return;
+            }
+
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "⏳ Guardando...";
+            }
+            if (alertBox) alertBox.style.display = "none";
+
+            try {
+                const sessionToken = localStorage.getItem('pingo_session_token') || '';
+                const fetchHeaders = { "Content-Type": "application/json" };
+                if (sessionToken) fetchHeaders['Authorization'] = 'Bearer ' + sessionToken;
+
+                const res = await fetch("/api/config", {
+                    method: "POST",
+                    credentials: 'include',
+                    headers: fetchHeaders,
+                    body: JSON.stringify({
+                        admin_password: admin_password,
+                        current_password: current_password
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (alertBox) {
+                        alertBox.style.display = "block";
+                        alertBox.className = "alert alert-success";
+                        alertBox.innerText = "✅ Contraseña de administrador actualizada con éxito en la MicroSD. Redirigiendo al login...";
+                    }
+                    if (newPassInput) newPassInput.value = "";
+                    if (currentPassInput) currentPassInput.value = "";
+                    localStorage.removeItem('pingo_session_token');
+                    setTimeout(() => window.location.reload(), 2000);
+                } else {
+                    if (alertBox) {
+                        alertBox.style.display = "block";
+                        alertBox.className = "alert alert-warning";
+                        alertBox.innerText = "⚠️ " + (data.error || "No se pudo actualizar la contraseña.");
+                    }
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerText = "🔒 Cambiar Clave";
+                    }
+                }
+            } catch (err) {
+                if (alertBox) {
+                    alertBox.style.display = "block";
+                    alertBox.className = "alert alert-warning";
+                    alertBox.innerText = "Error: " + err.message;
+                }
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = "🔒 Cambiar Clave";
+                }
+            }
+        }
+
+        async function initDashboardStatus() {
+            try {
+                const res = await fetch("/api/status");
+                const data = await res.json();
+                const mBadge = document.getElementById("mastodon-badge");
+                const mCheckbox = document.getElementById("mastodon-toggle-checkbox");
+                if (data && data.mastodon) {
+                    const isEnabled = !!data.mastodon.enabled;
+                    if (mCheckbox) mCheckbox.checked = isEnabled;
+                    if (mBadge) {
+                        mBadge.className = isEnabled ? "badge badge-success" : "badge badge-muted";
+                        mBadge.innerText = isEnabled ? "GoToSocial Activo" : "Desactivado";
+                    }
+                }
+            } catch (e) {}
+        }
+        window.addEventListener('DOMContentLoaded', initDashboardStatus);
+
 
         async function blockIP(ip) {
             if (!confirm("¿Deseas bloquear la IP " + ip + " para denegarle el acceso al servidor TURN?")) return;
