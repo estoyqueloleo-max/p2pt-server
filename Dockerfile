@@ -45,6 +45,8 @@ COPY --from=builder /p2pt-server /usr/bin/p2pt-server
 # Variables de entorno predeterminadas
 ENV PORT=443 \
     TURN_PORT=3478 \
+    MIN_RELAY_PORT=49152 \
+    MAX_RELAY_PORT=65535 \
     ENABLE_UPNP=false \
     ENABLE_MDNS=false \
     ENABLE_GIT=true \

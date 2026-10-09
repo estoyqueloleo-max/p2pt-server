@@ -73,7 +73,6 @@ TURN_REALM=%s
 TURN_STATIC_AUTH_SECRET=%s
 ADMIN_PASSWORD=%s
 ALLOW_WAN_DASHBOARD=%t
-ENABLE_MASTODON=%t
 `,
 		cfg.HTTPPort,
 		cfg.TURNPort,
@@ -90,7 +89,6 @@ ENABLE_MASTODON=%t
 		cfg.AuthSecret,
 		cfg.AdminPassword,
 		cfg.AllowWANDash,
-		cfg.EnableMastodon,
 	)
 
 	err := os.WriteFile(targetPath, []byte(strings.TrimSpace(content)+"\n"), 0644)
