@@ -30,7 +30,7 @@ if ! docker buildx inspect "${BUILDER_NAME}" >/dev/null 2>&1; then
     TMP_CONFIG=$(mktemp)
     cat <<EOF > "$TMP_CONFIG"
 [registry."${REGISTRY}"]
-  http = true
+  http = false
   insecure = true
 EOF
     docker buildx create --name "${BUILDER_NAME}" --config "$TMP_CONFIG" --use --bootstrap
