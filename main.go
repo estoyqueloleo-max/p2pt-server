@@ -957,6 +957,17 @@ func main() {
 		}
 	}
 
+	// WebPush Manager
+	pushDataDir := cfg.GitDir
+	if pushDataDir == "" {
+		pushDataDir = "/var/lib/p2pt"
+	}
+	pushMgr := NewPushManager(pushDataDir)
+	mux.HandleFunc("/push/subscribe", pushMgr.HandleSubscribe)
+	mux.HandleFunc("/push/send/", pushMgr.HandleSend)
+	mux.HandleFunc("/push/test/", pushMgr.HandleTest)
+	log.Printf("[PushManager] 🔔 Gateway de notificaciones WebPush (VAPID) activo en /push/subscribe y /push/send/")
+
 	// API Endpoints
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
