@@ -13,6 +13,9 @@ run: build
 cross:
 	./build.sh
 
+docker:
+	./build_docker.sh
+
 clean:
 	rm -f $(BINARY_NAME)
 	rm -rf dist/
