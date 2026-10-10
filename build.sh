@@ -35,6 +35,12 @@ GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o "$OUTPUT_DIR
 NFPM_BIN=$(which nfpm 2>/dev/null || echo "$HOME/go/bin/nfpm")
 VERSION="${VERSION:-1.4.0}"
 if [ -x "$NFPM_BIN" ] && [ -f "${SCRIPT_DIR}/nfpm.yaml" ]; then
+    # Asegurar que el frontend estático esté compilado para incluirlo en el paquete
+    if [ ! -d "${SCRIPT_DIR}/../dist" ] && [ -f "${SCRIPT_DIR}/../package.json" ]; then
+        echo "📦 Compilando frontend web PWA para el paquete del appliance..."
+        (cd "${SCRIPT_DIR}/.." && npm run build)
+    fi
+
     echo -e "\n📦 Generando paquetes APK para Alpine Linux con nfpm..."
     
     # APK armhf (Pi Zero)
