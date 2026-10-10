@@ -311,3 +311,112 @@ func TestTURN_RelayPacketTransmissionAndEcho(t *testing.T) {
 	}
 	t.Logf("✅ Client A received reply '%s' from %s via TURN Relay!", string(bufA[:nA]), fromPeerB.String())
 }
+
+func TestTURN_MeteredRelayTrafficAccounting(t *testing.T) {
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen on UDP packet: %v", err)
+	}
+	defer conn.Close()
+
+	serverPort := conn.LocalAddr().(*net.UDPAddr).Port
+	tm := NewTurnMonitor()
+
+	server, err := turn.NewServer(turn.ServerConfig{
+		Realm: "pingo",
+		AuthHandler: func(u string, r string, srcAddr net.Addr) ([]byte, bool) {
+			tm.RecordAuthAttempt(u, srcAddr, true)
+			return turn.GenerateAuthKey(u, r, "testpass"), true
+		},
+		PacketConnConfigs: []turn.PacketConnConfig{
+			{
+				PacketConn: NewMeteredPacketConn(conn, tm, false),
+				RelayAddressGenerator: NewMeteredRelayAddressGenerator(&turn.RelayAddressGeneratorPortRange{
+					RelayAddress: net.ParseIP("127.0.0.1"),
+					Address:      "127.0.0.1",
+					MinPort:      50200,
+					MaxPort:      50300,
+				}, tm),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create metered TURN server: %v", err)
+	}
+	defer server.Close()
+
+	// Connect client
+	clientConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create client listener: %v", err)
+	}
+	defer clientConn.Close()
+
+	timestamp := time.Now().Add(1 * time.Hour).Unix()
+	username := fmt.Sprintf("%d:peer-user-5g", timestamp)
+
+	client, err := turn.NewClient(&turn.ClientConfig{
+		TURNServerAddr: fmt.Sprintf("127.0.0.1:%d", serverPort),
+		Conn:           clientConn,
+		Username:       username,
+		Password:       "testpass",
+		Realm:          "pingo",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	if err := client.Listen(); err != nil {
+		t.Fatalf("client.Listen failed: %v", err)
+	}
+
+	relayConn, err := client.Allocate()
+	if err != nil {
+		t.Fatalf("Allocate failed: %v", err)
+	}
+	defer relayConn.Close()
+
+	// Peer B
+	peerBConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to create Peer B listener: %v", err)
+	}
+	defer peerBConn.Close()
+	peerBAddr := peerBConn.LocalAddr().(*net.UDPAddr)
+
+	if err := client.CreatePermission(peerBAddr); err != nil {
+		t.Fatalf("CreatePermission failed: %v", err)
+	}
+
+	// Send 10 packets of 100 bytes each
+	testPayload := make([]byte, 100)
+	for i := 0; i < 10; i++ {
+		_, err = relayConn.WriteTo(testPayload, peerBAddr)
+		if err != nil {
+			t.Fatalf("WriteTo failed: %v", err)
+		}
+	}
+
+	// Read on Peer B
+	buf := make([]byte, 1500)
+	peerBConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 10; i++ {
+		_, _, _ = peerBConn.ReadFrom(buf)
+	}
+
+	// Verify session in TurnMonitor has PeerID and BytesRelayed > 0
+	sessions, activeCount, _ := tm.GetActiveSessions()
+	if activeCount != 1 || len(sessions) != 1 {
+		t.Fatalf("Expected 1 active session, got %d", activeCount)
+	}
+
+	sess := sessions[0]
+	if sess.PeerID != "peer-user-5g" {
+		t.Errorf("Expected PeerID 'peer-user-5g', got '%s'", sess.PeerID)
+	}
+	if sess.BytesRelayed == 0 {
+		t.Errorf("Expected BytesRelayed > 0, got %d", sess.BytesRelayed)
+	}
+	t.Logf("✅ Metered TURN successfully counted: PeerID=%s, Relayed=%d bytes, Packets=%d", sess.PeerID, sess.BytesRelayed, sess.PacketsCount)
+}

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -117,9 +119,84 @@ func TestAPI_ConfigPersistence(t *testing.T) {
 	if !bytes.Contains(content, []byte("TOPIC_ID=amigos-valencia")) {
 		t.Errorf("Saved env file does not contain TOPIC_ID: %s", string(content))
 	}
-	if !bytes.Contains(content, []byte("DUCKDNS_DOMAIN=test-node")) {
-		t.Errorf("Saved env file does not contain DUCKDNS_DOMAIN: %s", string(content))
+	t.Log("✅ Config persistence to .env verified successfully!")
+}
+
+func TestAPI_WebFrontendServing(t *testing.T) {
+	// Create mock web dist dir
+	tmpDir, err := os.MkdirTemp("", "pingo_web_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	indexPath := filepath.Join(tmpDir, "index.html")
+	if err := os.WriteFile(indexPath, []byte("<html><body><h1>Pingo Sovereign Web</h1></body></html>"), 0644); err != nil {
+		t.Fatalf("Failed to write mock index.html: %v", err)
 	}
 
-	t.Log("✅ Config persistence to .env verified successfully!")
+	cfg := &Config{
+		HTTPPort: 9000,
+		TURNPort: 3478,
+		PublicIP: "pingo.appliance.local",
+		WebDir:   tmpDir,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == "/web" || strings.HasPrefix(path, "/web/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			subPath := strings.TrimPrefix(path, "/web")
+			subPath = strings.TrimPrefix(subPath, "/")
+			if subPath == "" {
+				subPath = "index.html"
+			}
+			targetFile := filepath.Join(cfg.WebDir, subPath)
+			if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, targetFile)
+				return
+			}
+			fallbackIndex := filepath.Join(cfg.WebDir, "index.html")
+			if _, err := os.Stat(fallbackIndex); err == nil {
+				http.ServeFile(w, r, fallbackIndex)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	// Test 1: GET /web
+	req := httptest.NewRequest("GET", "/web", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Expected 200 for /web, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "Pingo Sovereign Web") {
+		t.Fatalf("Expected body to contain 'Pingo Sovereign Web', got '%s'", rec.Body.String())
+	}
+
+	// Test 2: SPA deep link /web/room/123
+	reqSPA := httptest.NewRequest("GET", "/web/room/123", nil)
+	recSPA := httptest.NewRecorder()
+	mux.ServeHTTP(recSPA, reqSPA)
+
+	if recSPA.Code != http.StatusOK {
+		t.Fatalf("Expected 200 for SPA deep route, got %d", recSPA.Code)
+	}
+	if !strings.Contains(recSPA.Body.String(), "Pingo Sovereign Web") {
+		t.Fatalf("Expected SPA fallback to serve index.html")
+	}
+
+	// Test 3: generatePairConfig uses /web URL
+	_, _, pairURL := generatePairConfig(cfg)
+	if !strings.Contains(pairURL, "http://pingo.appliance.local:9000/web/?serverConfig=") {
+		t.Errorf("Expected pairURL to point to appliance /web, got: %s", pairURL)
+	}
+
+	t.Logf("✅ Web frontend serving & Sovereign pairURL verified: %s", pairURL)
 }

@@ -39,7 +39,14 @@ else
     docker buildx use "${BUILDER_NAME}"
 fi
 
-# 3. Compilar y pushear para linux/amd64 y linux/arm64
+# 3. Preparar frontend estático en el contexto de construcción si existe
+if [ -d "${SCRIPT_DIR}/../dist" ]; then
+    echo "📦 Sincronizando frontend web compilado (dist/) en contexto del appliance..."
+    rm -rf "${SERVER_DIR}/dist"
+    cp -r "${SCRIPT_DIR}/../dist" "${SERVER_DIR}/dist"
+fi
+
+# 4. Compilar y pushear para linux/amd64 y linux/arm64
 echo "🔨 Compilando y subiendo imágenes para linux/amd64 y linux/arm64..."
 docker buildx build \
     --platform linux/amd64,linux/arm64 \

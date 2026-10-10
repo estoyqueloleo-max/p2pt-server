@@ -11,6 +11,7 @@ import (
 
 type TurnSession struct {
 	Username      string    `json:"username"`
+	PeerID        string    `json:"peer_id"`
 	ClientIP      string    `json:"client_ip"`
 	RelayAddr     string    `json:"relay_addr"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -110,21 +111,24 @@ func (tm *TurnMonitor) RecordAuthAttempt(username string, srcAddr net.Addr, succ
 		rep.SuccessCount++
 		rep.Failures = 0 // reset failure counter on success
 
-		// Parse token expiration if username format is <timestamp>:<peer>
+		// Parse token expiration and peerId if username format is <timestamp>:<peer>
 		expiresAt := now.Add(24 * time.Hour)
 		isToken := false
+		peerID := username
 
 		parts := strings.Split(username, ":")
 		if len(parts) >= 2 {
 			if ts, err := strconv.ParseInt(parts[0], 10, 64); err == nil && ts > 0 {
 				expiresAt = time.Unix(ts, 0)
 				isToken = true
+				peerID = strings.Join(parts[1:], ":")
 			}
 		}
 
 		sessionKey := fmt.Sprintf("%s@%s", username, ip)
 		tm.sessions[sessionKey] = &TurnSession{
 			Username:     username,
+			PeerID:       peerID,
 			ClientIP:     ip,
 			CreatedAt:    now,
 			ExpiresAt:    expiresAt,
@@ -153,6 +157,83 @@ func (tm *TurnMonitor) RecordPacket(username string, clientIP string, bytes int)
 		s.BytesRelayed += int64(bytes)
 		s.PacketsCount++
 		s.LastActivity = time.Now()
+	}
+}
+
+// RecordRelayTraffic records bytes transferred through an allocated relay socket
+func (tm *TurnMonitor) RecordRelayTraffic(relayAddr string, remoteAddr net.Addr, bytes int) {
+	if bytes <= 0 {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	now := time.Now()
+	matched := false
+
+	// If relayAddr matches an active session, update it
+	if relayAddr != "" {
+		for _, s := range tm.sessions {
+			if s.RelayAddr == relayAddr {
+				s.BytesRelayed += int64(bytes)
+				s.PacketsCount++
+				s.LastActivity = now
+				matched = true
+				break
+			}
+		}
+	}
+
+	// Fallback: match by remote IP if communicating with client
+	if !matched && remoteAddr != nil {
+		remoteIP := extractIP(remoteAddr.String())
+		for _, s := range tm.sessions {
+			if s.ClientIP == remoteIP {
+				s.BytesRelayed += int64(bytes)
+				s.PacketsCount++
+				s.LastActivity = now
+				if s.RelayAddr == "" && relayAddr != "" {
+					s.RelayAddr = relayAddr
+				}
+				matched = true
+				break
+			}
+		}
+	}
+
+	// If still not matched, add to most recently active session
+	if !matched {
+		var newestSession *TurnSession
+		for _, s := range tm.sessions {
+			if newestSession == nil || s.LastActivity.Before(now) {
+				newestSession = s
+			}
+		}
+		if newestSession != nil {
+			newestSession.BytesRelayed += int64(bytes)
+			newestSession.PacketsCount++
+			newestSession.LastActivity = now
+		}
+	}
+}
+
+// RecordRawTraffic records raw bytes from the main TURN UDP listener socket
+func (tm *TurnMonitor) RecordRawTraffic(srcAddr net.Addr, bytes int) {
+	if bytes <= 0 || srcAddr == nil {
+		return
+	}
+	ip := extractIP(srcAddr.String())
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	now := time.Now()
+	for _, s := range tm.sessions {
+		if s.ClientIP == ip {
+			s.BytesRelayed += int64(bytes)
+			s.PacketsCount++
+			s.LastActivity = now
+			break
+		}
 	}
 }
 

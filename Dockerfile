@@ -37,10 +37,13 @@ RUN apk add --no-cache \
     tzdata
 
 # Estructura de directorios estándar de la appliance
-RUN mkdir -p /var/lib/p2pt/repos /etc/p2pt /var/log
+RUN mkdir -p /var/lib/p2pt/repos /var/lib/p2pt/web /etc/p2pt /var/log
 
 # Copiar binario compilado
 COPY --from=builder /p2pt-server /usr/bin/p2pt-server
+
+# Copiar frontend estático si existe en el contexto de construcción
+COPY dist* /var/lib/p2pt/web/
 
 # Variables de entorno predeterminadas
 ENV PORT=443 \

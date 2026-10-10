@@ -281,3 +281,21 @@ func (pm *PushManager) HandleTest(w http.ResponseWriter, r *http.Request) {
 
 	w.Write([]byte("Test push sent successfully"))
 }
+
+// GetSubscriptionsCount returns the number of registered peers
+func (pm *PushManager) GetSubscriptionsCount() int {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return len(pm.records)
+}
+
+// GetAllSubscriptions returns a snapshot list of subscribed records
+func (pm *PushManager) GetAllSubscriptions() []*PushSubscriptionRecord {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	list := make([]*PushSubscriptionRecord, 0, len(pm.records))
+	for _, rec := range pm.records {
+		list = append(list, rec)
+	}
+	return list
+}

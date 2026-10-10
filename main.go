@@ -58,6 +58,7 @@ type Config struct {
 	EnableGit      bool
 	GitDir         string
 	GitRepo        string
+	WebDir         string
 	EnableMastodon bool
 	MastodonTarget string
 	DDNSApplianceID string
@@ -387,7 +388,15 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
 
 	configJSONBytes, _ := json.MarshalIndent(clientConfig, "", "  ")
 	configBase64 := base64.URLEncoding.EncodeToString([]byte(configJSONBytes))
-	pairURL := fmt.Sprintf("%s/?serverConfig=%s", cfg.AppPublicURL, configBase64)
+
+	targetAppURL := cfg.AppPublicURL
+	// Si no se especificó un AppPublicURL externo o está configurado por defecto en GitHub Pages,
+	// y el appliance tiene activo su propio frontal web, preferir su propia URL soberana:
+	if targetAppURL == "" || targetAppURL == "https://estoyqueloleo-max.github.io/p2pt" {
+		targetAppURL = fmt.Sprintf("%s://%s:%d/web", proto, publicHost, cfg.HTTPPort)
+	}
+
+	pairURL := fmt.Sprintf("%s/?serverConfig=%s", targetAppURL, configBase64)
 
 	return clientConfig, string(configJSONBytes), pairURL
 }
@@ -618,6 +627,7 @@ func main() {
 	noGit := flag.Bool("no-git", false, "Disable embedded Smart HTTP Git server")
 	gitDir := flag.String("git-dir", "", "Directory for hosted Git repositories (default: /var/lib/p2pt/repos or ./data/repos)")
 	gitRepo := flag.String("git-repo", "routes", "Default hosted repository name (e.g. 'routes' or 'data')")
+	webDir := flag.String("web-dir", "", "Directory containing compiled frontend static files to serve on /web (default: ./dist or /var/lib/p2pt/web)")
 	enableMastodon := flag.Bool("mastodon", false, "Enable GoToSocial ActivityPub / Mastodon reverse proxy")
 	mastodonTarget := flag.String("mastodon-target", "http://127.0.0.1:8080", "Target address for GoToSocial backend")
 
@@ -663,6 +673,9 @@ func main() {
 	}
 	if envTopic := os.Getenv("TOPIC_ID"); envTopic != "" {
 		*topicFlag = envTopic
+	}
+	if envWebDir := os.Getenv("WEB_DIR"); envWebDir != "" {
+		*webDir = envWebDir
 	}
 	if envAppURL := os.Getenv("APP_URL"); envAppURL != "" {
 		*appURL = envAppURL
@@ -729,6 +742,7 @@ func main() {
 		EnableGit:        *enableGit,
 		GitDir:           *gitDir,
 		GitRepo:          *gitRepo,
+		WebDir:           *webDir,
 		EnableMastodon:   *enableMastodon,
 		MastodonTarget:   *mastodonTarget,
 		DDNSApplianceID:  os.Getenv("DDNS_APPLIANCE_ID"),
@@ -858,13 +872,13 @@ func main() {
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
-				PacketConn: turnUDPListener,
-				RelayAddressGenerator: &turn.RelayAddressGeneratorPortRange{
+				PacketConn: NewMeteredPacketConn(turnUDPListener, turnMonitor, false),
+				RelayAddressGenerator: NewMeteredRelayAddressGenerator(&turn.RelayAddressGeneratorPortRange{
 					RelayAddress: turnIP,
 					Address:      "0.0.0.0",
 					MinPort:      uint16(cfg.MinRelayPort),
 					MaxPort:      uint16(cfg.MaxRelayPort),
-				},
+				}, turnMonitor),
 			},
 		},
 	})
@@ -1485,7 +1499,50 @@ func main() {
 				authMgr.RenderLoginPage(w, r, "")
 				return
 			}
-			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, cloudHubMgr, tracker, turnMonitor, gitServer)
+			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, cloudHubMgr, tracker, turnMonitor, gitServer, pushMgr)
+			return
+		}
+
+		// Servir frontal Web PWA soberano bajo /web/ (o /web)
+		if path == "/web" || strings.HasPrefix(path, "/web/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			// Buscar directorio de distribución
+			resolvedWebDir := cfg.WebDir
+			if resolvedWebDir == "" {
+				candidates := []string{"./dist", "../dist", "/var/lib/p2pt/web", "/var/lib/p2pt/dist"}
+				for _, c := range candidates {
+					if info, err := os.Stat(c); err == nil && info.IsDir() {
+						resolvedWebDir = c
+						break
+					}
+				}
+			}
+
+			if resolvedWebDir == "" {
+				http.Error(w, "Web frontend dist not found on appliance. Run 'npm run build' or set WEB_DIR.", http.StatusNotFound)
+				return
+			}
+
+			subPath := strings.TrimPrefix(path, "/web")
+			subPath = strings.TrimPrefix(subPath, "/")
+			if subPath == "" {
+				subPath = "index.html"
+			}
+
+			targetFile := filepath.Join(resolvedWebDir, subPath)
+			if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, targetFile)
+				return
+			}
+
+			// SPA Fallback para rutas de PWA
+			fallbackIndex := filepath.Join(resolvedWebDir, "index.html")
+			if _, err := os.Stat(fallbackIndex); err == nil {
+				http.ServeFile(w, r, fallbackIndex)
+				return
+			}
+
+			http.NotFound(w, r)
 			return
 		}
 
@@ -1700,7 +1757,7 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 	fmt.Println("==================================================================")
 }
 
-func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, cloudHubMgr *CloudHubDDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor, gitServer *GitServer) {
+func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, cloudHubMgr *CloudHubDDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor, gitServer *GitServer, pushMgr *PushManager) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	currentWiFiSSID := ""
@@ -1754,14 +1811,19 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 				<button onclick="revokeSession('%s@%s')" class="btn btn-secondary" style="padding:3px 8px; font-size:0.75rem; border-radius:4px; cursor:pointer;">⚡ Expulsar</button>
 			</div>`, s.ClientIP, s.Username, s.ClientIP)
 
+			displayPeer := s.PeerID
+			if displayPeer == "" {
+				displayPeer = s.Username
+			}
+
 			sessionsRows.WriteString(fmt.Sprintf(`<tr>
-				<td style="padding:10px; font-family:monospace; color:var(--accent);">%s</td>
+				<td style="padding:10px;"><b style="font-family:monospace; color:var(--accent);">%s</b><br/><span style="font-size:0.72rem; color:var(--text-muted); font-family:monospace;">%s</span></td>
+				<td style="padding:10px; font-family:monospace;">%s</td>
+				<td style="padding:10px; font-weight:600; color:var(--text-main);">%.2f MB <span style="font-size:0.72rem; color:var(--text-muted); font-weight:normal;">(%d pkts)</span></td>
 				<td style="padding:10px;">%s</td>
-				<td style="padding:10px;">%.2f MB</td>
 				<td style="padding:10px;">%s</td>
 				<td style="padding:10px;">%s</td>
-				<td style="padding:10px;">%s</td>
-			</tr>`, s.Username, s.ClientIP, trafficMB, remainingStr, statusBadge, actionBtns))
+			</tr>`, displayPeer, s.Username, s.ClientIP, trafficMB, s.PacketsCount, remainingStr, statusBadge, actionBtns))
 		}
 	}
 
@@ -1893,6 +1955,55 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 				<div id="git-credentials-result" style="display:none; margin-top:10px; padding:10px; background:rgba(0,0,0,0.4); border-radius:6px; font-size:0.8rem; font-family:monospace; word-break:break-all;"></div>
 			</div>
 		</div>`, len(repos), gitRows.String()))
+	}
+
+	var pushSectionHTML strings.Builder
+	if pushMgr != nil {
+		pushSubs := pushMgr.GetAllSubscriptions()
+		var pushRows strings.Builder
+		if len(pushSubs) == 0 {
+			pushRows.WriteString(`<tr><td colspan="4" style="text-align:center; color:var(--text-muted); padding:14px;">No hay dispositivos móviles suscritos a WebPush en este appliance. Se registran automáticamente al activar Notificaciones en la App Pingo.</td></tr>`)
+		} else {
+			for _, sub := range pushSubs {
+				lastSeenStr := sub.LastSeen.Format("02 Jan 15:04")
+				pushRows.WriteString(fmt.Sprintf(`<tr>
+					<td style="padding:10px; font-family:monospace; color:var(--accent);"><b>%s</b></td>
+					<td style="padding:10px; font-size:0.78rem; color:var(--text-muted); max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">%s</td>
+					<td style="padding:10px; color:var(--text-muted);">%s</td>
+					<td style="padding:10px;">
+						<button onclick="testPushToPeer('%s')" class="btn" style="background:#3b82f6; color:white; padding:3px 10px; font-size:0.75rem; border:none; border-radius:4px; cursor:pointer;">🔔 Enviar Ping</button>
+					</td>
+				</tr>`, sub.UserPublicKey, sub.Endpoint, lastSeenStr, sub.UserPublicKey))
+			}
+		}
+
+		pushSectionHTML.WriteString(fmt.Sprintf(`
+		<div class="card" style="margin-top:20px;">
+			<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:10px;">
+				<h3 style="margin:0; display:flex; align-items:center; gap:8px;">
+					<span>🔔 Gateway de Notificaciones WebPush (VAPID)</span>
+					<span class="badge badge-info">%d Suscripciones</span>
+				</h3>
+			</div>
+			<p style="margin:0 0 14px 0; color:var(--text-muted); font-size:0.85rem;">
+				Servicio autónomo de notificaciones push estándar (RFC 8291/8292). Permite despertar a los móviles cuando reciben mensajes o llamadas P2P aunque la pestaña de Pingo esté en segundo plano.
+			</p>
+			<div style="overflow-x:auto;">
+				<table style="width:100%%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
+					<thead>
+						<tr style="border-bottom:1px solid rgba(255,255,255,0.1); color:var(--text-muted);">
+							<th style="padding:8px 10px;">Peer ID Registrado</th>
+							<th style="padding:8px 10px;">Endpoint de Navegador</th>
+							<th style="padding:8px 10px;">Última Actividad</th>
+							<th style="padding:8px 10px;">Acción</th>
+						</tr>
+					</thead>
+					<tbody>
+						%s
+					</tbody>
+				</table>
+			</div>
+		</div>`, len(pushSubs), pushRows.String()))
 	}
 
 	qrPNG, _ := qrcode.Encode(pairURL, qrcode.Medium, 256)
@@ -2327,7 +2438,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                 <table style="width:100%%; border-collapse:collapse; font-size:0.88rem; text-align:left;">
                     <thead>
                         <tr style="border-bottom:1px solid var(--border); color:var(--text-muted); font-size:0.75rem; text-transform:uppercase;">
-                            <th style="padding:8px 10px;">Usuario / Token</th>
+                            <th style="padding:8px 10px;">Peer ID / Credencial</th>
                             <th style="padding:8px 10px;">IP Origen</th>
                             <th style="padding:8px 10px;">Tráfico Relé</th>
                             <th style="padding:8px 10px;">Expiración</th>
@@ -2342,6 +2453,8 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             </div>
             %s
         </div>
+
+        %s
 
         %s
 
@@ -2809,6 +2922,20 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
         }
 
+        async function testPushToPeer(peerId) {
+            try {
+                const res = await fetch("/push/test/" + encodeURIComponent(peerId));
+                if (res.ok) {
+                    alert("✅ Notificación Push de prueba enviada con éxito al peer: " + peerId);
+                } else {
+                    const txt = await res.text();
+                    alert("⚠️ Error enviando Push: " + txt);
+                }
+            } catch (err) {
+                alert("Error de conexión: " + err.message);
+            }
+        }
+
         async function logout() {
             try {
                 await fetch("/api/auth/logout", { method: "POST" });
@@ -2846,6 +2973,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		sessionsRows.String(),
 		blockedSectionHTML.String(),
 		gitSectionHTML.String(),
+		pushSectionHTML.String(),
 		string(configJSONBytes),
 		pairURL,
 	)
