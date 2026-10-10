@@ -53,7 +53,8 @@ ENV PORT=443 \
     ENABLE_UPNP=false \
     ENABLE_MDNS=false \
     ENABLE_GIT=true \
-    GIT_DIR=/var/lib/p2pt/repos
+    GIT_DIR=/var/lib/p2pt/repos \
+    WEB_DIR=/var/lib/p2pt/web
 
 # Persistencia para repositorios Git y base de datos/tokens
 VOLUME ["/var/lib/p2pt"]
