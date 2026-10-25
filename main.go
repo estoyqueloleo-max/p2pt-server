@@ -276,11 +276,12 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 				target := s.GetClient(msg.Dst)
 				if target != nil {
 					msg.Src = id
+					log.Printf("[PeerJS] 🔀 Forwarding %s from %s to %s", msg.Type, id, msg.Dst)
 					if err := target.SendJSON(msg); err != nil {
 						log.Printf("[PeerJS] Failed to forward %s from %s to %s: %v", msg.Type, id, msg.Dst, err)
 					}
 				} else {
-					log.Printf("[PeerJS] Destination %s not found for message from %s", msg.Dst, id)
+					log.Printf("[PeerJS] Destination %s not found for message %s from %s", msg.Dst, msg.Type, id)
 					_ = client.SendJSON(PeerMessage{
 						Type: "ERROR",
 						Msg:  fmt.Sprintf("Could not connect to peer %s", msg.Dst),

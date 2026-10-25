@@ -328,14 +328,18 @@ func (tm *TurnMonitor) RevokeSession(sessionKey string) {
 		targetUser = parts[0]
 	}
 
-	tm.revokedTokens[targetUser] = now.Add(banDuration)
+	// Ban the specific session key (user@ip)
 	tm.revokedTokens[sessionKey] = now.Add(banDuration)
+	// Only ban targetUser if it's not the shared default username
+	if targetUser != "pingo" && targetUser != "" {
+		tm.revokedTokens[targetUser] = now.Add(banDuration)
+	}
 
 	if _, exists := tm.sessions[sessionKey]; exists {
 		delete(tm.sessions, sessionKey)
 	}
 	for key, s := range tm.sessions {
-		if s.Username == targetUser || s.Username == sessionKey || fmt.Sprintf("%s@%s", s.Username, s.ClientIP) == sessionKey {
+		if key == sessionKey || fmt.Sprintf("%s@%s", s.Username, s.ClientIP) == sessionKey {
 			delete(tm.sessions, key)
 		}
 	}
