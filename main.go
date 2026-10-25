@@ -65,6 +65,7 @@ type Config struct {
 	DDNSApplianceID string
 	DDNSSecretToken string
 	DDNSHubEndpoint string
+	WANIP          string
 	mu             sync.RWMutex
 }
 
@@ -78,6 +79,18 @@ func (c *Config) GetPublicIP() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.PublicIP
+}
+
+func (c *Config) SetWANIP(ip string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.WANIP = ip
+}
+
+func (c *Config) GetWANIP() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.WANIP
 }
 
 // PeerMessage represents messages exchanged over PeerJS signaling
@@ -858,6 +871,7 @@ func main() {
 	log.Printf("[Init] Local Network IP: %s", localIP)
 	log.Printf("[Init] Public WAN IP (Internet): %s", detectedPublicIP)
 	log.Printf("[Init] Configured Host/Domain: %s", cfg.PublicIP)
+	cfg.SetWANIP(detectedPublicIP)
 
 	// Initialize UPnP Manager
 	upnpMgr := NewUPnPManager(cfg.TURNPort, cfg.HTTPPort, localIP, detectedPublicIP)
@@ -874,6 +888,9 @@ func main() {
 	// Initialize DuckDNS Manager
 	duckMgr := NewDuckDNSManager(cfg.DuckDomain, cfg.DuckToken, func(fullDomain, currentIP string) {
 		cfg.SetPublicIP(fullDomain)
+		if currentIP != "" {
+			cfg.SetWANIP(currentIP)
+		}
 		log.Printf("[DuckDNS Callback] Host actualizado a: %s", fullDomain)
 	})
 	if cfg.DuckDomain != "" && cfg.DuckToken != "" {
@@ -884,6 +901,9 @@ func main() {
 	// Initialize Cloud Hub DDNS Manager (klitosan.com)
 	cloudHubMgr := NewCloudHubDDNSManager(cfg.DDNSApplianceID, cfg.DDNSSecretToken, cfg.DDNSHubEndpoint, func(subdomain, currentIP string) {
 		cfg.SetPublicIP(subdomain)
+		if currentIP != "" {
+			cfg.SetWANIP(currentIP)
+		}
 		log.Printf("[CloudHub DDNS Callback] Host actualizado a: %s (IP: %s)", subdomain, currentIP)
 	})
 	if cfg.DDNSApplianceID != "" && cfg.DDNSSecretToken != "" {
@@ -1235,15 +1255,30 @@ func main() {
 		turnURI := fmt.Sprintf("turn:%s:%d?transport=udp", cfg.GetPublicIP(), cfg.TURNPort)
 		stunURI := fmt.Sprintf("stun:%s:%d", cfg.GetPublicIP(), cfg.TURNPort)
 
+		iceList := []map[string]interface{}{
+			{
+				"urls":       []string{turnURI, stunURI},
+				"username":   turnUser,
+				"credential": turnPass,
+			},
+		}
+
+		// Si el Host público es un dominio (FQDN) y disponemos de la IP WAN directa,
+		// añadir también la entrada directa por IP como fallback inmediato contra errores de DNS móvil (error 701)
+		wanIP := cfg.GetWANIP()
+		if wanIP != "" && wanIP != cfg.GetPublicIP() && net.ParseIP(wanIP) != nil {
+			ipTurnURI := fmt.Sprintf("turn:%s:%d?transport=udp", wanIP, cfg.TURNPort)
+			ipStunURI := fmt.Sprintf("stun:%s:%d", wanIP, cfg.TURNPort)
+			iceList = append(iceList, map[string]interface{}{
+				"urls":       []string{ipTurnURI, ipStunURI},
+				"username":   turnUser,
+				"credential": turnPass,
+			})
+		}
+
 		clientCfg, _, _, _ := generatePairConfig(cfg)
 		resp := map[string]interface{}{
-			"iceServers": []map[string]interface{}{
-				{
-					"urls":       []string{turnURI, stunURI},
-					"username":   turnUser,
-					"credential": turnPass,
-				},
-			},
+			"iceServers":   iceList,
 			"ttl":          ttl,
 			"capabilities": clientCfg.Capabilities,
 			"broadcast":    clientCfg.Broadcast,
