@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/tls"
 	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -215,9 +216,40 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 
 	// Message processing loop
 	go func() {
+		// Intervalo de ping a nivel de WebSocket para proxies (HAProxy, Cloudflare, NAT móvil)
+		pingTicker := time.NewTicker(20 * time.Second)
 		defer func() {
+			pingTicker.Stop()
 			s.RemoveClient(id, token)
 			conn.Close()
+		}()
+
+		// Configurar pong handler para actualizar deadline de lectura (60s timeout)
+		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetPongHandler(func(string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			client.LastSeen = time.Now()
+			return nil
+		})
+
+		// Goroutine auxiliar para emitir PINGs periódicos
+		stopPing := make(chan struct{})
+		defer close(stopPing)
+		go func() {
+			for {
+				select {
+				case <-pingTicker.C:
+					client.mu.Lock()
+					_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+					err := conn.WriteMessage(websocket.PingMessage, []byte{})
+					client.mu.Unlock()
+					if err != nil {
+						return
+					}
+				case <-stopPing:
+					return
+				}
+			}
 		}()
 
 		for {
@@ -229,6 +261,8 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 				break
 			}
 
+			// Al recibir cualquier mensaje válido, renovar deadline de lectura
+			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 			client.LastSeen = time.Now()
 
 			switch msg.Type {
@@ -287,6 +321,7 @@ type ClientConfigJSON struct {
 		Enabled             bool   `json:"enabled"`
 		APIEndpoint         string `json:"apiEndpoint,omitempty"`
 		TurnCredentialsPath string `json:"turnCredentialsPath,omitempty"`
+		VAPIDPublicKey      string `json:"vapidPublicKey,omitempty"`
 	} `json:"cloud,omitempty"`
 	Git struct {
 		Enabled  bool   `json:"enabled"`
@@ -327,7 +362,9 @@ func fetchPublicIP() string {
 	return getLocalOutboundIP()
 }
 
-func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
+var globalPushMgr *PushManager
+
+func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string, string) {
 	publicHost := cfg.GetPublicIP()
 	clientConfig := ClientConfigJSON{
 		Version: 1,
@@ -385,6 +422,9 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
 	clientConfig.Cloud.Enabled = true
 	clientConfig.Cloud.APIEndpoint = fmt.Sprintf("%s://%s:%d", proto, publicHost, cfg.HTTPPort)
 	clientConfig.Cloud.TurnCredentialsPath = "/turn-credentials"
+	if globalPushMgr != nil {
+		clientConfig.Cloud.VAPIDPublicKey = globalPushMgr.GetVAPIDPublicKey()
+	}
 
 	configJSONBytes, _ := json.MarshalIndent(clientConfig, "", "  ")
 	configBase64 := base64.URLEncoding.EncodeToString([]byte(configJSONBytes))
@@ -398,7 +438,39 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string) {
 
 	pairURL := fmt.Sprintf("%s/?serverConfig=%s", targetAppURL, configBase64)
 
-	return clientConfig, string(configJSONBytes), pairURL
+	tokenHash := sha256.Sum256([]byte(pairURL))
+	shortToken := base64.RawURLEncoding.EncodeToString(tokenHash[:6])
+	registerShortPairURL(shortToken, pairURL, string(configJSONBytes))
+
+	shortPairURL := fmt.Sprintf("%s://%s:%d/c/%s", proto, publicHost, cfg.HTTPPort, shortToken)
+
+	return clientConfig, string(configJSONBytes), pairURL, shortPairURL
+}
+
+var (
+	shortURLsMu sync.RWMutex
+	shortURLsMap = make(map[string]shortPairData)
+)
+
+type shortPairData struct {
+	FullURL    string
+	ConfigJSON string
+}
+
+func registerShortPairURL(token, fullURL, configJSON string) {
+	shortURLsMu.Lock()
+	defer shortURLsMu.Unlock()
+	shortURLsMap[token] = shortPairData{
+		FullURL:    fullURL,
+		ConfigJSON: configJSON,
+	}
+}
+
+func getShortPairURL(token string) (shortPairData, bool) {
+	shortURLsMu.RLock()
+	defer shortURLsMu.RUnlock()
+	data, exists := shortURLsMap[token]
+	return data, exists
 }
 
 type ScannedNetwork struct {
@@ -939,6 +1011,7 @@ func main() {
 			mux.HandleFunc("/api/git/revoke", authMgr.RequireAuth(gitServer.HandleRevokePeer))
 			mux.HandleFunc("/api/git/unrevoke", authMgr.RequireAuth(gitServer.HandleUnrevokePeer))
 			mux.HandleFunc("/api/git/unlock", authMgr.RequireAuth(gitServer.HandleUnlockPeer))
+			mux.HandleFunc("/api/git/delete", authMgr.RequireAuth(gitServer.HandleDeleteRepo))
 			log.Printf("[GitServer] 🚀 Smart HTTP Git activo en /git/:user/:repo.git y credenciales en /git-credentials")
 		}
 	}
@@ -977,6 +1050,7 @@ func main() {
 		pushDataDir = "/var/lib/p2pt"
 	}
 	pushMgr := NewPushManager(pushDataDir)
+	globalPushMgr = pushMgr
 	mux.HandleFunc("/push/subscribe", pushMgr.HandleSubscribe)
 	mux.HandleFunc("/push/send/", pushMgr.HandleSend)
 	mux.HandleFunc("/push/test/", pushMgr.HandleTest)
@@ -994,18 +1068,19 @@ func main() {
 			return
 		}
 
-		clientCfg, _, pairURL := generatePairConfig(cfg)
+		clientCfg, _, pairURL, shortPairURL := generatePairConfig(cfg)
 
 		respData := map[string]interface{}{
-			"status":        "ok",
-			"topic_id":      cfg.TopicID,
-			"info_hash":     DeriveInfoHash(cfg.TopicID),
-			"clients_count": sigServer.ClientCount(),
-			"public_host":   cfg.GetPublicIP(),
-			"http_port":     cfg.HTTPPort,
-			"turn_port":     cfg.TURNPort,
-			"tls":           cfg.EnableTLS,
-			"pair_url":      pairURL,
+			"status":         "ok",
+			"topic_id":       cfg.TopicID,
+			"info_hash":      DeriveInfoHash(cfg.TopicID),
+			"clients_count":  sigServer.ClientCount(),
+			"public_host":    cfg.GetPublicIP(),
+			"http_port":      cfg.HTTPPort,
+			"turn_port":      cfg.TURNPort,
+			"tls":            cfg.EnableTLS,
+			"pair_url":       pairURL,
+			"short_pair_url": shortPairURL,
 			"config":        clientCfg,
 			"upnp":          upnpMgr.GetReport(),
 			"duckdns":       duckMgr.GetStatus(),
@@ -1064,15 +1139,16 @@ func main() {
 		}
 
 		status := duckMgr.GetStatus()
-		_, _, pairURL := generatePairConfig(cfg)
+		_, _, pairURL, shortPairURL := generatePairConfig(cfg)
 
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     ok,
-			"message":     msg,
-			"error":       fmt.Sprintf("%v", err),
-			"duckdns":     status,
-			"public_host": cfg.GetPublicIP(),
-			"pair_url":    pairURL,
+			"success":        ok,
+			"message":        msg,
+			"error":          fmt.Sprintf("%v", err),
+			"duckdns":        status,
+			"public_host":    cfg.GetPublicIP(),
+			"pair_url":       pairURL,
+			"short_pair_url": shortPairURL,
 		})
 	}))
 
@@ -1096,7 +1172,7 @@ func main() {
 
 	mux.HandleFunc("/config", authMgr.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		clientConfig, _, _ := generatePairConfig(cfg)
+		clientConfig, _, _, _ := generatePairConfig(cfg)
 		_ = json.NewEncoder(w).Encode(clientConfig)
 	}))
 
@@ -1124,6 +1200,11 @@ func main() {
 			"auto_update":     cfg.EnableAutoUpdate,
 			"active_clients":  sigServer.ClientCount(),
 			"tracker_swarms":  tracker.SwarmCount(),
+			"push": map[string]interface{}{
+				"enabled":          pushMgr != nil,
+				"subscriptions":    pushMgr.GetSubscriptionsCount(),
+				"vapid_public_key": pushMgr.GetVAPIDPublicKey(),
+			},
 		}
 		_ = json.NewEncoder(w).Encode(status)
 	})
@@ -1153,7 +1234,7 @@ func main() {
 		turnURI := fmt.Sprintf("turn:%s:%d?transport=udp", cfg.GetPublicIP(), cfg.TURNPort)
 		stunURI := fmt.Sprintf("stun:%s:%d", cfg.GetPublicIP(), cfg.TURNPort)
 
-		clientCfg, _, _ := generatePairConfig(cfg)
+		clientCfg, _, _, _ := generatePairConfig(cfg)
 		resp := map[string]interface{}{
 			"iceServers": []map[string]interface{}{
 				{
@@ -1185,16 +1266,17 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		clientCfg, _, pairURL := generatePairConfig(cfg)
+		clientCfg, _, pairURL, shortPairURL := generatePairConfig(cfg)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":       "ok",
-			"version":      clientCfg.Version,
-			"signaling":    clientCfg.Signaling,
-			"turn":         clientCfg.Turn,
-			"capabilities": clientCfg.Capabilities,
-			"broadcast":    clientCfg.Broadcast,
-			"cloud":        clientCfg.Cloud,
-			"pair_url":     pairURL,
+			"status":         "ok",
+			"version":        clientCfg.Version,
+			"signaling":      clientCfg.Signaling,
+			"turn":           clientCfg.Turn,
+			"capabilities":   clientCfg.Capabilities,
+			"broadcast":      clientCfg.Broadcast,
+			"cloud":          clientCfg.Cloud,
+			"pair_url":       pairURL,
+			"short_pair_url": shortPairURL,
 		})
 	})
 
@@ -1503,13 +1585,46 @@ func main() {
 			return
 		}
 
-		// Servir frontal Web PWA soberano bajo /web/ (o /web)
-		if path == "/web" || strings.HasPrefix(path, "/web/") {
+		// Acortador de URLs para vinculación rápida por QR: /c/{token}
+		if strings.HasPrefix(path, "/c/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			token := strings.TrimPrefix(path, "/c/")
+			if data, ok := getShortPairURL(token); ok {
+				if r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(data.ConfigJSON))
+					return
+				}
+				http.Redirect(w, r, data.FullURL, http.StatusFound)
+				return
+			}
+			http.Error(w, "Enlace de vinculación no encontrado o caducado.", http.StatusNotFound)
+			return
+		}
+
+		// Redirección limpia de /web a /web/ para garantizar resolución de rutas relativas (./assets/...)
+		if path == "/web" {
+			target := "/web/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+
+		// Servir frontal Web PWA soberano bajo /web/ (o assets solicitados en /assets/)
+		if strings.HasPrefix(path, "/web/") || strings.HasPrefix(path, "/assets/") {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			// Buscar directorio de distribución
 			resolvedWebDir := cfg.WebDir
 			if resolvedWebDir == "" {
-				candidates := []string{"./dist", "../dist", "/var/lib/p2pt/web", "/var/lib/p2pt/dist"}
+				candidates := []string{"/usr/share/pingo/web", "/var/lib/p2pt/web", "./dist", "../dist", "/var/lib/p2pt/dist"}
 				for _, c := range candidates {
 					if info, err := os.Stat(c); err == nil && info.IsDir() {
 						resolvedWebDir = c
@@ -1523,7 +1638,12 @@ func main() {
 				return
 			}
 
-			subPath := strings.TrimPrefix(path, "/web")
+			var subPath string
+			if strings.HasPrefix(path, "/assets/") {
+				subPath = strings.TrimPrefix(path, "/")
+			} else {
+				subPath = strings.TrimPrefix(path, "/web/")
+			}
 			subPath = strings.TrimPrefix(subPath, "/")
 			if subPath == "" {
 				subPath = "index.html"
@@ -1535,11 +1655,13 @@ func main() {
 				return
 			}
 
-			// SPA Fallback para rutas de PWA
-			fallbackIndex := filepath.Join(resolvedWebDir, "index.html")
-			if _, err := os.Stat(fallbackIndex); err == nil {
-				http.ServeFile(w, r, fallbackIndex)
-				return
+			// SPA Fallback para rutas de PWA (solo cuando la petición es bajo /web/)
+			if strings.HasPrefix(path, "/web/") {
+				fallbackIndex := filepath.Join(resolvedWebDir, "index.html")
+				if _, err := os.Stat(fallbackIndex); err == nil {
+					http.ServeFile(w, r, fallbackIndex)
+					return
+				}
 			}
 
 			http.NotFound(w, r)
@@ -1608,8 +1730,8 @@ func main() {
 		}()
 	}
 
-	_, configJSON, pairURL := generatePairConfig(cfg)
-	printBanner(cfg, pairURL, configJSON, upnpMgr.GetReport(), duckMgr.GetStatus())
+	_, configJSON, pairURL, shortPairURL := generatePairConfig(cfg)
+	printBanner(cfg, pairURL, shortPairURL, configJSON, upnpMgr.GetReport(), duckMgr.GetStatus())
 
 	// Iniciar servidor auxiliar en Puerto 80 para Portal Cautivo y redirección automática a HTTPS
 	if cfg.HTTPPort != 80 {
@@ -1685,7 +1807,7 @@ func main() {
 	log.Println("[Server] Detenido.")
 }
 
-func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck DuckDNSStatus) {
+func printBanner(cfg *Config, pairURL, shortPairURL, configJSON string, upnp *UPnPReport, duck DuckDNSStatus) {
 	fmt.Println("==================================================================")
 	fmt.Println("  🌐 PINGO STANDALONE SERVER (PeerJS Signaling + Pion TURN/STUN)   ")
 	fmt.Println("==================================================================")
@@ -1745,9 +1867,18 @@ func printBanner(cfg *Config, pairURL, configJSON string, upnp *UPnPReport, duck
 
 	fmt.Println("------------------------------------------------------------------")
 	fmt.Println(" 📲 VINCULACIÓN INSTANTÁNEA CON PINGO (Escanear QR o Abrir Enlace):")
-	fmt.Printf(" %s\n\n", pairURL)
+	if shortPairURL != "" {
+		fmt.Printf(" Enlace Corto (QR)   : %s\n", shortPairURL)
+		fmt.Printf(" Enlace Completo     : %s\n\n", pairURL)
+	} else {
+		fmt.Printf(" %s\n\n", pairURL)
+	}
 
-	qr, err := qrcode.New(pairURL, qrcode.Medium)
+	qrTarget := shortPairURL
+	if qrTarget == "" {
+		qrTarget = pairURL
+	}
+	qr, err := qrcode.New(qrTarget, qrcode.Medium)
 	if err == nil {
 		fmt.Println(qr.ToSmallString(false))
 	}
@@ -1777,7 +1908,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 	}
 
 
-	_, configJSONBytes, pairURL := generatePairConfig(cfg)
+	_, configJSONBytes, pairURL, shortPairURL := generatePairConfig(cfg)
 	upnpReport := upnpMgr.GetReport()
 	duckStatus := duckMgr.GetStatus()
 	sessions, activeCount, blockedCount := turnMonitor.GetActiveSessions()
@@ -1879,14 +2010,16 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 				claim, hasClaim := claims[repo.Namespace]
 
 				statusBadge := `<span class="badge badge-info">⚪ No Reclamado</span>`
-				actionBtn := fmt.Sprintf(`<button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button>`, repo.Namespace)
+				deleteBtn := fmt.Sprintf(`<button onclick="deleteGitRepo('%s')" class="btn" style="background:#dc2626; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Eliminar repositorio y sus datos">🗑️ Borrar</button>`, repo.Namespace)
+
+				actionBtn := fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button>%s</div>`, repo.Namespace, deleteBtn)
 
 				if isRevoked {
 					statusBadge = `<span class="badge badge-error">🚫 Revocado</span>`
-					actionBtn = fmt.Sprintf(`<button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>`, repo.Namespace)
+					actionBtn = fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>%s</div>`, repo.Namespace, deleteBtn)
 				} else if hasClaim && claim.TokenHash != "" {
 					statusBadge = `<span class="badge badge-success">🔒 Vinculado (Reclamado)</span>`
-					actionBtn = fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unlockGitPeer('%s')" class="btn" style="background:#f59e0b; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Permite que un nuevo dispositivo vuelva a reclamar credenciales">🔓 Desbloquear</button><button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button></div>`, repo.Namespace, repo.Namespace)
+					actionBtn = fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unlockGitPeer('%s')" class="btn" style="background:#f59e0b; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Permite que un nuevo dispositivo vuelva a reclamar credenciales">🔓 Desbloquear</button><button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button>%s</div>`, repo.Namespace, repo.Namespace, deleteBtn)
 				}
 				sizeKB := float64(repo.Size) / 1024.0
 
@@ -1901,11 +2034,12 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 
 			for p, claim := range claims {
 				if !seenNamespaces[p] {
+					deleteBtn := fmt.Sprintf(`<button onclick="deleteGitRepo('%s')" class="btn" style="background:#dc2626; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Eliminar vinculación y datos">🗑️ Borrar</button>`, p)
 					statusBadge := `<span class="badge badge-success">🔒 Vinculado (Reclamado)</span>`
-					actionBtn := fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unlockGitPeer('%s')" class="btn" style="background:#f59e0b; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Permite que un nuevo dispositivo vuelva a reclamar credenciales">🔓 Desbloquear</button><button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button></div>`, p, p)
+					actionBtn := fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unlockGitPeer('%s')" class="btn" style="background:#f59e0b; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;" title="Permite que un nuevo dispositivo vuelva a reclamar credenciales">🔓 Desbloquear</button><button onclick="revokeGitPeer('%s')" class="btn" style="background:#ef4444; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🚫 Revocar</button>%s</div>`, p, p, deleteBtn)
 					if claim.Revoked || revokedMap[p] {
 						statusBadge = `<span class="badge badge-error">🚫 Revocado</span>`
-						actionBtn = fmt.Sprintf(`<button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>`, p)
+						actionBtn = fmt.Sprintf(`<div style="display:flex; gap:4px;"><button onclick="unrevokeGitPeer('%s')" class="btn" style="background:#10b981; color:white; padding:3px 8px; font-size:0.75rem; border-radius:4px; border:none; cursor:pointer;">🟢 Restaurar</button>%s</div>`, p, deleteBtn)
 					}
 					gitRows.WriteString(fmt.Sprintf(`<tr>
 						<td style="padding:10px; font-family:monospace; color:var(--accent); font-weight:600;">%s</td>
@@ -2006,7 +2140,11 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		</div>`, len(pushSubs), pushRows.String()))
 	}
 
-	qrPNG, _ := qrcode.Encode(pairURL, qrcode.Medium, 256)
+	qrTarget := shortPairURL
+	if qrTarget == "" {
+		qrTarget = pairURL
+	}
+	qrPNG, _ := qrcode.Encode(qrTarget, qrcode.Medium, 256)
 	qrBase64 := base64.StdEncoding.EncodeToString(qrPNG)
 
 	hubStatus := CloudHubDDNSStatus{Enabled: false}
@@ -2466,6 +2604,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 
     <script>
         let currentPairURL = "%s";
+        let currentShortPairURL = "%s";
 
         function setIPMode(mode) {
             const container = document.getElementById('static-ip-container');
@@ -2654,6 +2793,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
         function copyPairURL() {
             const btn = document.getElementById("copy-btn");
             const originalText = btn ? btn.innerHTML : "📋 Copiar Enlace";
+            const targetCopyURL = currentShortPairURL || currentPairURL;
             
             function showSuccess() {
                 if (btn) {
@@ -2667,11 +2807,11 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
 
             if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(currentPairURL).then(showSuccess).catch(() => {
-                    fallbackCopy(currentPairURL);
+                navigator.clipboard.writeText(targetCopyURL).then(showSuccess).catch(() => {
+                    fallbackCopy(targetCopyURL);
                 });
             } else {
-                fallbackCopy(currentPairURL);
+                fallbackCopy(targetCopyURL);
             }
 
             function fallbackCopy(text) {
@@ -2780,6 +2920,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
                     
                     if (data.pair_url) {
                         currentPairURL = data.pair_url;
+                        if (data.short_pair_url) currentShortPairURL = data.short_pair_url;
                         const pairBtn = document.getElementById("pair-btn");
                         if (pairBtn) pairBtn.href = data.pair_url;
                     }
@@ -2895,6 +3036,25 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             }
         }
 
+        async function deleteGitRepo(peerId) {
+            if (!confirm("⚠️ ¿Estás seguro de que deseas ELIMINAR el repositorio Git del Peer '" + peerId + "'?\n\nEsta acción borrará de forma permanente los datos del repositorio en el appliance y sus vinculaciones.")) return;
+            try {
+                const res = await fetch("/api/git/delete", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ peerId: peerId })
+                });
+                const d = await res.json();
+                if (d.success) {
+                    window.location.reload();
+                } else {
+                    alert("Error eliminando repositorio: " + (d.error || "Error desconocido"));
+                }
+            } catch (err) {
+                alert("Error eliminando repositorio: " + err.message);
+            }
+        }
+
         async function requestGitCredentials() {
             const peerId = document.getElementById("git-peer-input").value.trim();
             const resDiv = document.getElementById("git-credentials-result");
@@ -2976,6 +3136,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		pushSectionHTML.String(),
 		string(configJSONBytes),
 		pairURL,
+		shortPairURL,
 	)
 
 	fmt.Fprint(w, html)

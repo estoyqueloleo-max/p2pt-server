@@ -37,12 +37,13 @@ RUN apk add --no-cache \
     tzdata
 
 # Estructura de directorios estándar de la appliance
-RUN mkdir -p /var/lib/p2pt/repos /var/lib/p2pt/web /etc/p2pt /var/log
+RUN mkdir -p /var/lib/p2pt/repos /var/lib/p2pt/web /usr/share/pingo/web /etc/p2pt /var/log
 
 # Copiar binario compilado
 COPY --from=builder /p2pt-server /usr/bin/p2pt-server
 
-# Copiar frontend estático si existe en el contexto de construcción
+# Copiar frontend estático tanto a /usr/share/pingo/web (inmutable, no afectado por volumen) como a /var/lib/p2pt/web
+COPY dist* /usr/share/pingo/web/
 COPY dist* /var/lib/p2pt/web/
 
 # Variables de entorno predeterminadas
@@ -54,7 +55,7 @@ ENV PORT=443 \
     ENABLE_MDNS=false \
     ENABLE_GIT=true \
     GIT_DIR=/var/lib/p2pt/repos \
-    WEB_DIR=/var/lib/p2pt/web
+    WEB_DIR=/usr/share/pingo/web
 
 # Persistencia para repositorios Git y base de datos/tokens
 VOLUME ["/var/lib/p2pt"]

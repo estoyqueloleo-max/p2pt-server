@@ -41,6 +41,12 @@ type PushManager struct {
 	subscriberEmail string
 }
 
+type VAPIDKeysStore struct {
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+	Email      string `json:"email"`
+}
+
 func NewPushManager(dataDir string) *PushManager {
 	if dataDir == "" {
 		dataDir = "/var/lib/p2pt"
@@ -55,18 +61,61 @@ func NewPushManager(dataDir string) *PushManager {
 		subscriberEmail: os.Getenv("VAPID_SUBSCRIBER_EMAIL"),
 	}
 
-	if pm.vapidPublicKey == "" {
-		pm.vapidPublicKey = defaultVAPIDPublicKey
+	vapidKeysFile := filepath.Join(dataDir, "vapid_keys.json")
+
+	// Si no vienen por variables de entorno, intentar cargar del archivo persistente
+	if pm.vapidPublicKey == "" || pm.vapidPrivateKey == "" {
+		if data, err := os.ReadFile(vapidKeysFile); err == nil {
+			var ks VAPIDKeysStore
+			if err := json.Unmarshal(data, &ks); err == nil && ks.PublicKey != "" && ks.PrivateKey != "" {
+				pm.vapidPublicKey = ks.PublicKey
+				pm.vapidPrivateKey = ks.PrivateKey
+				if pm.subscriberEmail == "" && ks.Email != "" {
+					pm.subscriberEmail = ks.Email
+				}
+				log.Printf("[PushManager] 🔑 Claves VAPID cargadas desde %s", vapidKeysFile)
+			}
+		}
 	}
-	if pm.vapidPrivateKey == "" {
-		pm.vapidPrivateKey = defaultVAPIDPrivateKey
+
+	// Si aún no existen, auto-generar un par nuevo y persistirlo
+	if pm.vapidPublicKey == "" || pm.vapidPrivateKey == "" {
+		priv, pub, err := webpush.GenerateVAPIDKeys()
+		if err == nil && priv != "" && pub != "" {
+			pm.vapidPublicKey = pub
+			pm.vapidPrivateKey = priv
+			if pm.subscriberEmail == "" {
+				pm.subscriberEmail = defaultSubscriberEmail
+			}
+			ks := VAPIDKeysStore{
+				PublicKey:  pub,
+				PrivateKey: priv,
+				Email:      pm.subscriberEmail,
+			}
+			if b, err := json.MarshalIndent(ks, "", "  "); err == nil {
+				_ = os.WriteFile(vapidKeysFile, b, 0600)
+				log.Printf("[PushManager] ✨ Claves VAPID auto-generadas y persistidas en %s", vapidKeysFile)
+			}
+		} else {
+			// Fallback a las claves predeterminadas
+			pm.vapidPublicKey = defaultVAPIDPublicKey
+			pm.vapidPrivateKey = defaultVAPIDPrivateKey
+		}
 	}
+
 	if pm.subscriberEmail == "" {
 		pm.subscriberEmail = defaultSubscriberEmail
 	}
 
 	pm.loadFromDisk()
 	return pm
+}
+
+// GetVAPIDPublicKey returns the active public VAPID key
+func (pm *PushManager) GetVAPIDPublicKey() string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.vapidPublicKey
 }
 
 func (pm *PushManager) loadFromDisk() {

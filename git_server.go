@@ -583,6 +583,80 @@ func (gs *GitServer) HandleUnrevokePeer(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// DeleteRepo removes a Git repository and optionally cleans up claims for that peer
+func (gs *GitServer) DeleteRepo(namespace string) error {
+	cleanNS := strings.TrimSpace(namespace)
+	if cleanNS == "" || cleanNS == "." || cleanNS == ".." || strings.Contains(cleanNS, "/") || strings.Contains(cleanNS, "\\") {
+		return fmt.Errorf("namespace de repositorio inválido: %s", cleanNS)
+	}
+
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+
+	targetDir := filepath.Join(gs.rootDir, cleanNS)
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		return fmt.Errorf("error calculando ruta de repositorio: %w", err)
+	}
+	absRoot, err := filepath.Abs(gs.rootDir)
+	if err != nil {
+		return fmt.Errorf("error calculando ruta raíz: %w", err)
+	}
+
+	// Security check: ensure target is strictly inside rootDir
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return fmt.Errorf("acceso denegado: ruta fuera del directorio git")
+	}
+
+	if _, err := os.Stat(absTarget); err == nil {
+		if err := os.RemoveAll(absTarget); err != nil {
+			return fmt.Errorf("error eliminando repositorio en disco: %w", err)
+		}
+		log.Printf("[GitServer] 🗑️ Repositorio eliminado de disco: %s", absTarget)
+	}
+
+	// Clean up claim and revocation state
+	delete(gs.claims, cleanNS)
+	delete(gs.revokedPeers, cleanNS)
+	gs.saveClaimsLocked()
+
+	return nil
+}
+
+// HandleDeleteRepo handles HTTP POST requests to delete a peer's Git repository
+func (gs *GitServer) HandleDeleteRepo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		PeerID string `json:"peerId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.PeerID) == "" {
+		http.Error(w, `{"error":"peerId requerido"}`, http.StatusBadRequest)
+		return
+	}
+
+	peerID := strings.TrimSpace(req.PeerID)
+	if err := gs.DeleteRepo(peerID); err != nil {
+		log.Printf("[GitServer] ⚠️ Error al eliminar repositorio para peer '%s': %v", peerID, err)
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[GitServer] 🗑️ Repositorio de peer '%s' eliminado por admin", peerID)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"deleted": peerID,
+	})
+}
+
 // scanRepos scans rootDir for bare repositories (*.git)
 func (gs *GitServer) scanRepos() []RepoInfo {
 	gs.mu.RLock()

@@ -54,3 +54,26 @@ func TestPushManager_Subscribe(t *testing.T) {
 		t.Errorf("Expected salt 'test-salt', got '%s'", record.Salt)
 	}
 }
+
+func TestPushManager_VAPIDKeysAutoGeneration(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "push_vapid_*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Inicializar primer PushManager sin env vars
+	pm1 := NewPushManager(tmpDir)
+	pub1 := pm1.GetVAPIDPublicKey()
+	if pub1 == "" {
+		t.Fatalf("Expected non-empty VAPID public key")
+	}
+
+	// Segundo PushManager apuntando al mismo directorio debe cargar las mismas claves persistidas
+	pm2 := NewPushManager(tmpDir)
+	pub2 := pm2.GetVAPIDPublicKey()
+
+	if pub1 != pub2 {
+		t.Errorf("Expected persisted VAPID key to match across reloads: %s vs %s", pub1, pub2)
+	}
+}

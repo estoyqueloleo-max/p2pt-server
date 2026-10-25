@@ -135,6 +135,12 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 		t.Fatalf("Failed to write mock index.html: %v", err)
 	}
 
+	_ = os.MkdirAll(filepath.Join(tmpDir, "assets"), 0755)
+	assetPath := filepath.Join(tmpDir, "assets", "app.js")
+	if err := os.WriteFile(assetPath, []byte("console.log('pingo')"), 0644); err != nil {
+		t.Fatalf("Failed to write mock app.js: %v", err)
+	}
+
 	cfg := &Config{
 		HTTPPort: 9000,
 		TURNPort: 3478,
@@ -145,9 +151,36 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path == "/web" || strings.HasPrefix(path, "/web/") {
+		if strings.HasPrefix(path, "/c/") {
+			token := strings.TrimPrefix(path, "/c/")
+			if data, ok := getShortPairURL(token); ok {
+				if r.URL.Query().Get("format") == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(data.ConfigJSON))
+					return
+				}
+				http.Redirect(w, r, data.FullURL, http.StatusFound)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+		if path == "/web" {
+			target := "/web/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		if strings.HasPrefix(path, "/web/") || strings.HasPrefix(path, "/assets/") {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			subPath := strings.TrimPrefix(path, "/web")
+			var subPath string
+			if strings.HasPrefix(path, "/assets/") {
+				subPath = strings.TrimPrefix(path, "/")
+			} else {
+				subPath = strings.TrimPrefix(path, "/web/")
+			}
 			subPath = strings.TrimPrefix(subPath, "/")
 			if subPath == "" {
 				subPath = "index.html"
@@ -157,10 +190,12 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 				http.ServeFile(w, r, targetFile)
 				return
 			}
-			fallbackIndex := filepath.Join(cfg.WebDir, "index.html")
-			if _, err := os.Stat(fallbackIndex); err == nil {
-				http.ServeFile(w, r, fallbackIndex)
-				return
+			if strings.HasPrefix(path, "/web/") {
+				fallbackIndex := filepath.Join(cfg.WebDir, "index.html")
+				if _, err := os.Stat(fallbackIndex); err == nil {
+					http.ServeFile(w, r, fallbackIndex)
+					return
+				}
 			}
 			http.NotFound(w, r)
 			return
@@ -168,16 +203,36 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 		http.NotFound(w, r)
 	})
 
-	// Test 1: GET /web
+	// Test 1: GET /web redirects with 301 to /web/
 	req := httptest.NewRequest("GET", "/web", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("Expected 200 for /web, got %d", rec.Code)
+	if rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("Expected 301 redirect for /web, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Pingo Sovereign Web") {
-		t.Fatalf("Expected body to contain 'Pingo Sovereign Web', got '%s'", rec.Body.String())
+	if rec.Header().Get("Location") != "/web/" {
+		t.Fatalf("Expected Location /web/, got '%s'", rec.Header().Get("Location"))
+	}
+
+	// Test 1b: GET /web/ returns index.html
+	reqSlash := httptest.NewRequest("GET", "/web/", nil)
+	recSlash := httptest.NewRecorder()
+	mux.ServeHTTP(recSlash, reqSlash)
+
+	if recSlash.Code != http.StatusOK {
+		t.Fatalf("Expected 200 for /web/, got %d", recSlash.Code)
+	}
+	if !strings.Contains(recSlash.Body.String(), "Pingo Sovereign Web") {
+		t.Fatalf("Expected body to contain 'Pingo Sovereign Web', got '%s'", recSlash.Body.String())
+	}
+
+	// Test 1c: GET /assets/app.js resolves correctly
+	reqAssets := httptest.NewRequest("GET", "/assets/app.js", nil)
+	recAssets := httptest.NewRecorder()
+	mux.ServeHTTP(recAssets, reqAssets)
+	if recAssets.Code != http.StatusOK || !strings.Contains(recAssets.Body.String(), "console.log('pingo')") {
+		t.Fatalf("Expected 200 and asset content for /assets/app.js, got %d", recAssets.Code)
 	}
 
 	// Test 2: SPA deep link /web/room/123
@@ -192,11 +247,45 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 		t.Fatalf("Expected SPA fallback to serve index.html")
 	}
 
-	// Test 3: generatePairConfig uses /web URL
-	_, _, pairURL := generatePairConfig(cfg)
+	// Test 3: generatePairConfig uses /web URL and generates short URL
+	_, configJSONBytes, pairURL, shortPairURL := generatePairConfig(cfg)
 	if !strings.Contains(pairURL, "http://pingo.appliance.local:9000/web/?serverConfig=") {
 		t.Errorf("Expected pairURL to point to appliance /web, got: %s", pairURL)
 	}
+	if !strings.Contains(shortPairURL, "http://pingo.appliance.local:9000/c/") {
+		t.Errorf("Expected shortPairURL to point to /c/{token}, got: %s", shortPairURL)
+	}
+
+	// Test 4: Short URL redirect /c/{token} -> 302 Found to full pairURL
+	tokenParts := strings.Split(shortPairURL, "/c/")
+	if len(tokenParts) != 2 {
+		t.Fatalf("Invalid shortPairURL format: %s", shortPairURL)
+	}
+	shortToken := tokenParts[1]
+
+	reqShort := httptest.NewRequest("GET", "/c/"+shortToken, nil)
+	recShort := httptest.NewRecorder()
+	mux.ServeHTTP(recShort, reqShort)
+
+	if recShort.Code != http.StatusFound {
+		t.Fatalf("Expected 302 Found for /c/%s, got %d", shortToken, recShort.Code)
+	}
+	if loc := recShort.Header().Get("Location"); loc != pairURL {
+		t.Errorf("Expected Location header %s, got %s", pairURL, loc)
+	}
+
+	// Test 5: Short URL with format=json returns raw configuration JSON
+	reqJSON := httptest.NewRequest("GET", "/c/"+shortToken+"?format=json", nil)
+	recJSON := httptest.NewRecorder()
+	mux.ServeHTTP(recJSON, reqJSON)
+
+	if recJSON.Code != http.StatusOK {
+		t.Fatalf("Expected 200 OK for /c/%s?format=json, got %d", shortToken, recJSON.Code)
+	}
+	if recJSON.Body.String() != configJSONBytes {
+		t.Errorf("Expected body to match configJSONBytes")
+	}
 
 	t.Logf("✅ Web frontend serving & Sovereign pairURL verified: %s", pairURL)
+	t.Logf("✅ Short URL & Redirect verified: %s -> %s", shortPairURL, pairURL)
 }

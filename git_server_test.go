@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -345,6 +346,61 @@ func TestGitServer_CredentialsAndPeerIsolation(t *testing.T) {
 	server.ServeHTTP(wNewTokenAccess, reqNewToken)
 	if wNewTokenAccess.Code != http.StatusOK {
 		t.Errorf("Expected new token to be accepted, got %d", wNewTokenAccess.Code)
+	}
+
+	// 9. Delete repo test: deletes repo directory and clears claims
+	peerDir := filepath.Join(tempDir, "pingo-peer-1")
+	if _, err := os.Stat(peerDir); os.IsNotExist(err) {
+		t.Fatalf("Expected peer repo dir %s to exist before deletion", peerDir)
+	}
+
+	// Test path traversal rejection
+	if err := server.DeleteRepo("../something"); err == nil {
+		t.Error("Expected DeleteRepo with relative traversal to fail")
+	}
+	if err := server.DeleteRepo(""); err == nil {
+		t.Error("Expected DeleteRepo with empty namespace to fail")
+	}
+
+	// Test valid deletion via DeleteRepo
+	if err := server.DeleteRepo("pingo-peer-1"); err != nil {
+		t.Fatalf("Failed to delete peer repo: %v", err)
+	}
+	if _, err := os.Stat(peerDir); !os.IsNotExist(err) {
+		t.Errorf("Expected peer repo dir %s to be deleted from disk", peerDir)
+	}
+	if server.GetPeerClaim("pingo-peer-1") != nil {
+		t.Error("Expected claim for pingo-peer-1 to be removed")
+	}
+
+	// Test HandleDeleteRepo HTTP handler
+	// Create another repo first
+	reqPeer2 := httptest.NewRequest("GET", "/git-credentials?peerId=pingo-peer-2", nil)
+	wPeer2 := httptest.NewRecorder()
+	server.HandleGitCredentials(wPeer2, reqPeer2)
+	reqInit2 := httptest.NewRequest("GET", "/git/pingo-peer-2/routes.git/info/refs?service=git-upload-pack", nil)
+	var creds2 struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(wPeer2.Body).Decode(&creds2)
+	reqInit2.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("pingo-peer-2:"+creds2.Token)))
+	wInit2 := httptest.NewRecorder()
+	server.ServeHTTP(wInit2, reqInit2)
+
+	peer2Dir := filepath.Join(tempDir, "pingo-peer-2")
+	if _, err := os.Stat(peer2Dir); os.IsNotExist(err) {
+		t.Fatalf("Expected peer2 repo dir %s to exist", peer2Dir)
+	}
+
+	// Call HandleDeleteRepo
+	reqDel := httptest.NewRequest("POST", "/api/git/delete", strings.NewReader(`{"peerId":"pingo-peer-2"}`))
+	wDel := httptest.NewRecorder()
+	server.HandleDeleteRepo(wDel, reqDel)
+	if wDel.Code != http.StatusOK {
+		t.Fatalf("Expected HandleDeleteRepo to return 200 OK, got %d: %s", wDel.Code, wDel.Body.String())
+	}
+	if _, err := os.Stat(peer2Dir); !os.IsNotExist(err) {
+		t.Errorf("Expected peer2 repo dir to be deleted via HandleDeleteRepo")
 	}
 }
 
