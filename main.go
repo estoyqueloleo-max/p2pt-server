@@ -922,9 +922,23 @@ func main() {
 	}
 
 	// 1. Initialize Pion TURN / STUN Server
-	turnIP := net.ParseIP(cfg.PublicIP)
+	turnIP := net.ParseIP(cfg.GetWANIP())
+	if turnIP == nil {
+		turnIP = net.ParseIP(cfg.GetPublicIP())
+	}
 	if turnIP == nil {
 		turnIP = net.ParseIP(detectedPublicIP)
+	}
+	if turnIP == nil {
+		// Try resolving PublicIP if it's a domain name
+		if ips, err := net.LookupIP(cfg.GetPublicIP()); err == nil && len(ips) > 0 {
+			for _, ip := range ips {
+				if ip.To4() != nil {
+					turnIP = ip
+					break
+				}
+			}
+		}
 	}
 	if turnIP == nil {
 		turnIP = net.ParseIP("127.0.0.1")
@@ -939,7 +953,15 @@ func main() {
 	}
 	defer turnUDPListener.Close()
 
-	turnServer, err := turn.NewServer(turn.ServerConfig{
+	turnTCPListener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.TURNPort))
+	if err != nil {
+		log.Printf("[TURN] Warning: Could not listen on TCP port %d: %v", cfg.TURNPort, err)
+	} else {
+		defer turnTCPListener.Close()
+		log.Printf("[TURN] Relay TCP listo en 0.0.0.0:%d", cfg.TURNPort)
+	}
+
+	turnCfg := turn.ServerConfig{
 		Realm:         cfg.Realm,
 		LoggerFactory: logging.NewDefaultLoggerFactory(),
 		AuthHandler: func(u string, r string, srcAddr net.Addr) ([]byte, bool) {
@@ -984,12 +1006,28 @@ func main() {
 				}, turnMonitor),
 			},
 		},
-	})
+	}
+
+	if turnTCPListener != nil {
+		turnCfg.ListenerConfigs = []turn.ListenerConfig{
+			{
+				Listener: turnTCPListener,
+				RelayAddressGenerator: NewMeteredRelayAddressGenerator(&turn.RelayAddressGeneratorPortRange{
+					RelayAddress: turnIP,
+					Address:      "0.0.0.0",
+					MinPort:      uint16(cfg.MinRelayPort),
+					MaxPort:      uint16(cfg.MaxRelayPort),
+				}, turnMonitor),
+			},
+		}
+	}
+
+	turnServer, err := turn.NewServer(turnCfg)
 	if err != nil {
 		log.Fatalf("[TURN] Failed to create TURN server: %v", err)
 	}
 	defer turnServer.Close()
-	log.Printf("[TURN] Relay UDP listo en 0.0.0.0:%d (Externo: %s:%d)", cfg.TURNPort, cfg.PublicIP, cfg.TURNPort)
+	log.Printf("[TURN] Relay UDP listo en 0.0.0.0:%d (Externo: %s:%d, Relay IP: %s)", cfg.TURNPort, cfg.PublicIP, cfg.TURNPort, turnIP)
 
 	// 2. Initialize PeerJS Signaling Server & WebTorrent Tracker
 	sigServer := NewSignalingServer(cfg)
@@ -1272,16 +1310,18 @@ func main() {
 		wanIP := cfg.GetWANIP()
 		if wanIP != "" && wanIP != cfg.GetPublicIP() && net.ParseIP(wanIP) != nil {
 			ipTurnURI := fmt.Sprintf("turn:%s:%d?transport=udp", wanIP, cfg.TURNPort)
+			ipTurnTCPURI := fmt.Sprintf("turn:%s:%d?transport=tcp", wanIP, cfg.TURNPort)
 			ipStunURI := fmt.Sprintf("stun:%s:%d", wanIP, cfg.TURNPort)
 			iceList = append(iceList, map[string]interface{}{
-				"urls":       []string{ipTurnURI, ipStunURI},
+				"urls":       []string{ipTurnURI, ipTurnTCPURI, ipStunURI},
 				"username":   turnUser,
 				"credential": turnPass,
 			})
 		}
 
+		turnTCPURI := fmt.Sprintf("turn:%s:%d?transport=tcp", cfg.GetPublicIP(), cfg.TURNPort)
 		iceList = append(iceList, map[string]interface{}{
-			"urls":       []string{turnURI, stunURI},
+			"urls":       []string{turnURI, turnTCPURI, stunURI},
 			"username":   turnUser,
 			"credential": turnPass,
 		})
