@@ -401,6 +401,7 @@ func generatePairConfig(cfg *Config) (ClientConfigJSON, string, string, string) 
 	clientConfig.Turn.URLs = []string{
 		fmt.Sprintf("stun:%s:%d", publicHost, cfg.TURNPort),
 		fmt.Sprintf("turn:%s:%d?transport=udp", publicHost, cfg.TURNPort),
+		fmt.Sprintf("turn:%s:%d?transport=tcp", publicHost, cfg.TURNPort),
 	}
 	clientConfig.Turn.Username = cfg.Username
 	clientConfig.Turn.Credential = cfg.Password
@@ -961,9 +962,33 @@ func main() {
 		log.Printf("[TURN] Relay TCP listo en 0.0.0.0:%d", cfg.TURNPort)
 	}
 
+	// Ring Relay Address Generator para eliminar saturación de puertos UDP (Error 508)
+	ringRelay := NewRingRelayAddressGenerator(
+		turnIP,
+		"0.0.0.0",
+		uint16(cfg.MinRelayPort),
+		uint16(cfg.MaxRelayPort),
+		turnMonitor,
+	)
+	defer ringRelay.Close()
+
 	turnCfg := turn.ServerConfig{
-		Realm:         cfg.Realm,
-		LoggerFactory: logging.NewDefaultLoggerFactory(),
+		Realm:              cfg.Realm,
+		LoggerFactory:      logging.NewDefaultLoggerFactory(),
+		ChannelBindTimeout: 60 * time.Second, // TTL reducido de 10 min a 60s
+		EventHandler: turn.EventHandler{
+			OnAllocationCreated: func(srcAddr, dstAddr net.Addr, protocol, username, realm string, relayAddr net.Addr, requestedPort int) {
+				log.Printf("[TURN-Ring] Allocation creada: user=%s from=%s relay=%s", username, srcAddr, relayAddr)
+				turnMonitor.RecordAllocationCreated(username, srcAddr, relayAddr)
+			},
+			OnAllocationDeleted: func(srcAddr, dstAddr net.Addr, protocol, username, realm string) {
+				log.Printf("[TURN-Ring] Allocation liberada: user=%s from=%s", username, srcAddr)
+				turnMonitor.RecordAllocationDeleted(username, srcAddr)
+			},
+			OnPermissionCreated: func(srcAddr, dstAddr net.Addr, protocol, username, realm string, relayAddr net.Addr, peer net.IP) {
+				ringRelay.RegisterPermission(relayAddr, peer.String())
+			},
+		},
 		AuthHandler: func(u string, r string, srcAddr net.Addr) ([]byte, bool) {
 			log.Printf("[TURN-Auth] Auth request for user: %s, realm: %s from %s", u, r, srcAddr)
 			if turnMonitor.CheckIPBlocked(srcAddr) {
@@ -997,13 +1022,8 @@ func main() {
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
-				PacketConn: NewMeteredPacketConn(turnUDPListener, turnMonitor, false),
-				RelayAddressGenerator: NewMeteredRelayAddressGenerator(&turn.RelayAddressGeneratorPortRange{
-					RelayAddress: turnIP,
-					Address:      "0.0.0.0",
-					MinPort:      uint16(cfg.MinRelayPort),
-					MaxPort:      uint16(cfg.MaxRelayPort),
-				}, turnMonitor),
+				PacketConn:            NewMeteredPacketConn(turnUDPListener, turnMonitor, false),
+				RelayAddressGenerator: ringRelay,
 			},
 		},
 	}
@@ -1011,13 +1031,8 @@ func main() {
 	if turnTCPListener != nil {
 		turnCfg.ListenerConfigs = []turn.ListenerConfig{
 			{
-				Listener: turnTCPListener,
-				RelayAddressGenerator: NewMeteredRelayAddressGenerator(&turn.RelayAddressGeneratorPortRange{
-					RelayAddress: turnIP,
-					Address:      "0.0.0.0",
-					MinPort:      uint16(cfg.MinRelayPort),
-					MaxPort:      uint16(cfg.MaxRelayPort),
-				}, turnMonitor),
+				Listener:              turnTCPListener,
+				RelayAddressGenerator: ringRelay,
 			},
 		}
 	}
@@ -1123,6 +1138,7 @@ func main() {
 	mux.HandleFunc("/push/subscribe", pushMgr.HandleSubscribe)
 	mux.HandleFunc("/push/send/", pushMgr.HandleSend)
 	mux.HandleFunc("/push/test/", pushMgr.HandleTest)
+	mux.HandleFunc("/push/vapid-public-key", pushMgr.HandleVAPIDPublicKey)
 	log.Printf("[PushManager] 🔔 Gateway de notificaciones WebPush (VAPID) activo en /push/subscribe y /push/send/")
 
 	// API Endpoints
@@ -1154,6 +1170,11 @@ func main() {
 			"upnp":          upnpMgr.GetReport(),
 			"duckdns":       duckMgr.GetStatus(),
 			"cloudhub_ddns": cloudHubMgr.GetStatus(),
+			"push": map[string]interface{}{
+				"enabled":          pushMgr != nil,
+				"subscriptions":    pushMgr.GetSubscriptionsCount(),
+				"vapid_public_key": pushMgr.GetVAPIDPublicKey(),
+			},
 			"mastodon": func() interface{} {
 				if gtsMgr != nil {
 					return gtsMgr.GetStatus(r.Context())
@@ -1328,10 +1349,12 @@ func main() {
 
 		clientCfg, _, _, _ := generatePairConfig(cfg)
 		resp := map[string]interface{}{
-			"iceServers":   iceList,
-			"ttl":          ttl,
-			"capabilities": clientCfg.Capabilities,
-			"broadcast":    clientCfg.Broadcast,
+			"iceServers":     iceList,
+			"ttl":            ttl,
+			"capabilities":   clientCfg.Capabilities,
+			"broadcast":      clientCfg.Broadcast,
+			"vapidPublicKey": clientCfg.Cloud.VAPIDPublicKey,
+			"cloud":          clientCfg.Cloud,
 		}
 		_ = json.NewEncoder(w).Encode(resp)
 	})
@@ -1767,14 +1790,18 @@ func main() {
 	})
 
 	// 3. Initialize TLS Certificates (Let's Encrypt via DuckDNS DNS-01 or Local/Self-Signed fallback)
-	cert, errTLS := EnsureTLSCertificates(cfg)
-	if errTLS == nil {
-		tlsMu.Lock()
-		currentTLSCert = cert
-		tlsMu.Unlock()
-		cfg.EnableTLS = true
+	if cfg.EnableTLS || cfg.HTTPPort == 443 {
+		cert, errTLS := EnsureTLSCertificates(cfg)
+		if errTLS == nil {
+			tlsMu.Lock()
+			currentTLSCert = cert
+			tlsMu.Unlock()
+			cfg.EnableTLS = true
+		} else {
+			log.Printf("[TLS] Aviso: certificado inicial no disponible: %v", errTLS)
+		}
 	} else {
-		log.Printf("[TLS] Aviso: certificado inicial no disponible: %v", errTLS)
+		log.Printf("[TLS] Modo HTTP plano activado (puerto %d sin TLS)", cfg.HTTPPort)
 	}
 
 	// 4. Initialize Swarm Announcer (P2P Topic Federation)
@@ -1867,9 +1894,16 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
-		if err := httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("[Signaling] Error HTTPS: %v", err)
+		if cfg.EnableTLS {
+			log.Printf("[Signaling] 🔒 Servidor Seguro HTTPS / WSS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
+			if err := httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("[Signaling] Error HTTPS: %v", err)
+			}
+		} else {
+			log.Printf("[Signaling] 🔓 Servidor HTTP / WS activo en :%d (Dual-Stack IPv4/IPv6)...", cfg.HTTPPort)
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("[Signaling] Error HTTP: %v", err)
+			}
 		}
 	}()
 

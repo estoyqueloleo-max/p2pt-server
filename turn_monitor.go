@@ -64,7 +64,10 @@ func (tm *TurnMonitor) cleanupExpired() {
 
 	now := time.Now()
 	for key, s := range tm.sessions {
-		if now.After(s.ExpiresAt) && now.Sub(s.LastActivity) > 2*time.Minute {
+		// Purgar sesiones cerradas (>30s) o que lleven más de 2 minutos sin actividad
+		if s.Status == "closed" && now.Sub(s.LastActivity) > 30*time.Second {
+			delete(tm.sessions, key)
+		} else if now.After(s.ExpiresAt) && now.Sub(s.LastActivity) > 2*time.Minute {
 			delete(tm.sessions, key)
 		}
 	}
@@ -111,8 +114,8 @@ func (tm *TurnMonitor) RecordAuthAttempt(username string, srcAddr net.Addr, succ
 		rep.SuccessCount++
 		rep.Failures = 0 // reset failure counter on success
 
-		// Parse token expiration and peerId if username format is <timestamp>:<peer>
-		expiresAt := now.Add(24 * time.Hour)
+		// TTL de asignación reducido a 60s por defecto para evitar puertos huérfanos
+		expiresAt := now.Add(60 * time.Second)
 		isToken := false
 		peerID := username
 
@@ -144,6 +147,56 @@ func (tm *TurnMonitor) RecordAuthAttempt(username string, srcAddr net.Addr, succ
 		if rep.Failures >= 20 {
 			rep.BlockedUntil = now.Add(10 * time.Minute)
 		}
+	}
+}
+
+// RecordAllocationCreated registra una asignación activa en el monitor
+func (tm *TurnMonitor) RecordAllocationCreated(username string, srcAddr, relayAddr net.Addr) {
+	if srcAddr == nil {
+		return
+	}
+	ip := extractIP(srcAddr.String())
+	now := time.Now()
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	sessionKey := fmt.Sprintf("%s@%s", username, ip)
+	s, exists := tm.sessions[sessionKey]
+	if !exists {
+		s = &TurnSession{
+			Username:     username,
+			PeerID:       username,
+			ClientIP:     ip,
+			CreatedAt:    now,
+			Status:       "active",
+		}
+		tm.sessions[sessionKey] = s
+	}
+
+	s.Status = "active"
+	s.LastActivity = now
+	s.ExpiresAt = now.Add(60 * time.Second)
+	if relayAddr != nil {
+		s.RelayAddr = relayAddr.String()
+	}
+}
+
+// RecordAllocationDeleted marca la asignación como cerrada al finalizar
+func (tm *TurnMonitor) RecordAllocationDeleted(username string, srcAddr net.Addr) {
+	if srcAddr == nil {
+		return
+	}
+	ip := extractIP(srcAddr.String())
+	now := time.Now()
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	sessionKey := fmt.Sprintf("%s@%s", username, ip)
+	if s, exists := tm.sessions[sessionKey]; exists {
+		s.Status = "closed"
+		s.ExpiresAt = now
 	}
 }
 
@@ -248,8 +301,12 @@ func (tm *TurnMonitor) GetActiveSessions() ([]*TurnSession, int, int) {
 	blockedCount := 0
 
 	for _, s := range tm.sessions {
-		if now.After(s.ExpiresAt) {
-			s.Status = "expired"
+		if s.Status == "closed" || now.After(s.ExpiresAt) {
+			if s.Status != "closed" {
+				s.Status = "expired"
+			}
+		} else if now.Sub(s.LastActivity) > 60*time.Second {
+			s.Status = "idle"
 		} else {
 			s.Status = "active"
 			activeCount++

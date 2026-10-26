@@ -420,3 +420,43 @@ func TestTURN_MeteredRelayTrafficAccounting(t *testing.T) {
 	}
 	t.Logf("✅ Metered TURN successfully counted: PeerID=%s, Relayed=%d bytes, Packets=%d", sess.PeerID, sess.BytesRelayed, sess.PacketsCount)
 }
+
+func TestTURN_RingRelay_PortMultiplexing(t *testing.T) {
+	tm := NewTurnMonitor()
+	ring := NewRingRelayAddressGenerator(net.ParseIP("127.0.0.1"), "127.0.0.1", 53100, 53101, tm)
+	defer ring.Close()
+
+	if err := ring.Validate(); err != nil {
+		t.Fatalf("Ring validation failed: %v", err)
+	}
+
+	// Solicitar 6 asignaciones en un pool de sólo 2 puertos (53100 y 53101)
+	conns := make([]net.PacketConn, 6)
+	addrs := make([]net.Addr, 6)
+
+	for i := 0; i < 6; i++ {
+		conn, addr, err := ring.AllocatePacketConn("udp", 0)
+		if err != nil {
+			t.Fatalf("Alloc %d falló inesperadamente con error: %v (debería soportar multiplexación sin Error 508)", i, err)
+		}
+		conns[i] = conn
+		addrs[i] = addr
+	}
+
+	// Comprobar que los puertos asignados alternan entre 53100 y 53101 (Round-Robin)
+	for i := 0; i < 6; i++ {
+		expectedPort := 53100 + (i % 2)
+		udpAddr, ok := addrs[i].(*net.UDPAddr)
+		if !ok || udpAddr.Port != expectedPort {
+			t.Errorf("Alloc %d esperaba puerto %d, obtuvo %v", i, expectedPort, addrs[i])
+		}
+	}
+	t.Logf("✅ RingRelay multiplexó con éxito 6 asignaciones en 2 puertos sin error 508!")
+
+	// Liberar todas las conexiones virtuales
+	for _, c := range conns {
+		if err := c.Close(); err != nil {
+			t.Errorf("Error cerrando virtual conn: %v", err)
+		}
+	}
+}

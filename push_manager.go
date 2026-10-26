@@ -157,6 +157,40 @@ func generatePingoAuthToken(salt string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
+func verifyPingoAuthToken(receivedToken, salt string) bool {
+	if salt == "" || receivedToken == "" || receivedToken == "public" {
+		return true
+	}
+	now := time.Now().UTC()
+	offsets := []time.Duration{0, -1 * time.Hour, 1 * time.Hour}
+	for _, offset := range offsets {
+		t := now.Add(offset)
+		timeKey := fmt.Sprintf("%d-%d-%d-%d", t.Year(), int(t.Month())-1, t.Day(), t.Hour())
+		message := salt + timeKey
+		hash := sha256.Sum256([]byte(message))
+		if fmt.Sprintf("%x", hash) == receivedToken {
+			return true
+		}
+	}
+	return false
+}
+
+// HandleVAPIDPublicKey handles GET /push/vapid-public-key
+func (pm *PushManager) HandleVAPIDPublicKey(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"vapidPublicKey": pm.GetVAPIDPublicKey(),
+	})
+}
+
 // HandleSubscribe handles POST /push/subscribe
 func (pm *PushManager) HandleSubscribe(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -254,8 +288,7 @@ func (pm *PushManager) HandleSend(w http.ResponseWriter, r *http.Request) {
 	// Validar autenticación de emisor si se proporciona salt o si está registrado
 	authHeader := r.Header.Get("X-Pingo-Auth")
 	if senderRec != nil && senderRec.Salt != "" {
-		expectedToken := generatePingoAuthToken(senderRec.Salt)
-		if authHeader != "" && authHeader != expectedToken {
+		if authHeader != "" && !verifyPingoAuthToken(authHeader, senderRec.Salt) {
 			log.Printf("[PushManager] Auth inválido para sender %s", senderID)
 			http.Error(w, "Invalid Auth Token", http.StatusUnauthorized)
 			return
@@ -288,6 +321,14 @@ func (pm *PushManager) HandleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		log.Printf("[PushManager] 🗑️ Suscripción no válida o expirada para %s (HTTP %d). Eliminando...", targetID, resp.StatusCode)
+		pm.mu.Lock()
+		delete(pm.records, targetID)
+		pm.saveToDiskLocked()
+		pm.mu.Unlock()
+	}
 
 	log.Printf("[PushManager] Notificación enviada con éxito a %s (HTTP %d)", targetID, resp.StatusCode)
 	w.WriteHeader(resp.StatusCode)
@@ -327,6 +368,14 @@ func (pm *PushManager) HandleTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		log.Printf("[PushManager] 🗑️ Suscripción no válida para %s (HTTP %d). Eliminando...", targetID, resp.StatusCode)
+		pm.mu.Lock()
+		delete(pm.records, targetID)
+		pm.saveToDiskLocked()
+		pm.mu.Unlock()
+	}
 
 	w.Write([]byte("Test push sent successfully"))
 }
