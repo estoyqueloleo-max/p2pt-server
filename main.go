@@ -240,12 +240,19 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 			conn.Close()
 		}()
 
-		// Configurar pong handler para actualizar deadline de lectura (60s timeout)
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		// Configurar pong y ping handlers para mantener vivo el websocket con móviles y proxies
+		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		conn.SetPongHandler(func(string) error {
-			_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 			client.LastSeen = time.Now()
 			return nil
+		})
+		conn.SetPingHandler(func(appData string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+			client.LastSeen = time.Now()
+			client.mu.Lock()
+			defer client.mu.Unlock()
+			return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
 		})
 
 		// Goroutine auxiliar para emitir PINGs periódicos
