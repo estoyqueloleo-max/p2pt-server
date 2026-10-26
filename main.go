@@ -1268,16 +1268,7 @@ func main() {
 		turnURI := fmt.Sprintf("turn:%s:%d?transport=udp", cfg.GetPublicIP(), cfg.TURNPort)
 		stunURI := fmt.Sprintf("stun:%s:%d", cfg.GetPublicIP(), cfg.TURNPort)
 
-		iceList := []map[string]interface{}{
-			{
-				"urls":       []string{turnURI, stunURI},
-				"username":   turnUser,
-				"credential": turnPass,
-			},
-		}
-
-		// Si el Host público es un dominio (FQDN) y disponemos de la IP WAN directa,
-		// añadir también la entrada directa por IP como fallback inmediato contra errores de DNS móvil (error 701)
+		var iceList []map[string]interface{}
 		wanIP := cfg.GetWANIP()
 		if wanIP != "" && wanIP != cfg.GetPublicIP() && net.ParseIP(wanIP) != nil {
 			ipTurnURI := fmt.Sprintf("turn:%s:%d?transport=udp", wanIP, cfg.TURNPort)
@@ -1288,6 +1279,12 @@ func main() {
 				"credential": turnPass,
 			})
 		}
+
+		iceList = append(iceList, map[string]interface{}{
+			"urls":       []string{turnURI, stunURI},
+			"username":   turnUser,
+			"credential": turnPass,
+		})
 
 		clientCfg, _, _, _ := generatePairConfig(cfg)
 		resp := map[string]interface{}{
