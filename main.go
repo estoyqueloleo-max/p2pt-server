@@ -162,14 +162,17 @@ func (s *SignalingServer) AddClient(id, token string, conn *websocket.Conn) *Cli
 	return client
 }
 
-func (s *SignalingServer) RemoveClient(id, token string) {
+func (s *SignalingServer) RemoveClient(id, token string, conn *websocket.Conn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if client, exists := s.clients[id]; exists {
-		if token == "" || client.Token == token {
-			delete(s.clients, id)
-			log.Printf("[PeerJS] Unregistered client ID: %s (remaining: %d)", id, len(s.clients))
+		// Only remove if it matches the current conn (prevent race when a reconnect has already registered a new conn)
+		if conn == nil || client.Conn == conn {
+			if token == "" || client.Token == token {
+				delete(s.clients, id)
+				log.Printf("[PeerJS] Unregistered client ID: %s (remaining: %d)", id, len(s.clients))
+			}
 		}
 	}
 }
@@ -222,7 +225,7 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 	// Send OPEN message
 	if err := client.SendJSON(PeerMessage{Type: "OPEN"}); err != nil {
 		log.Printf("[PeerJS] Error sending OPEN to %s: %v", id, err)
-		s.RemoveClient(id, token)
+		s.RemoveClient(id, token, conn)
 		conn.Close()
 		return
 	}
@@ -233,7 +236,7 @@ func (s *SignalingServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		pingTicker := time.NewTicker(20 * time.Second)
 		defer func() {
 			pingTicker.Stop()
-			s.RemoveClient(id, token)
+			s.RemoveClient(id, token, conn)
 			conn.Close()
 		}()
 
@@ -1243,7 +1246,10 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		ttl := 86400
 		expiry := time.Now().Unix() + int64(ttl)
-		user := r.URL.Query().Get("user")
+		user := r.URL.Query().Get("peerId")
+		if user == "" {
+			user = r.URL.Query().Get("user")
+		}
 		if user == "" {
 			user = "pingo-client"
 		}
