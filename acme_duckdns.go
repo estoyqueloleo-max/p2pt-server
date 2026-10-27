@@ -58,6 +58,12 @@ func CheckExistingCertValid(certPath, keyPath, domain string, minDays int) (tls.
 		return tls.Certificate{}, false
 	}
 
+	// Rechazar si es un certificado autofirmado (Subject == Issuer)
+	if x509Cert.Issuer.CommonName == x509Cert.Subject.CommonName {
+		log.Printf("[ACME] Certificado existente en %s es autofirmado (Issuer=%s). Requiere certificado oficial Let's Encrypt.", certPath, x509Cert.Issuer.CommonName)
+		return tls.Certificate{}, false
+	}
+
 	remaining := time.Until(x509Cert.NotAfter)
 	if remaining < time.Duration(minDays)*24*time.Hour {
 		log.Printf("[ACME] Certificado existente para %s próximo a expirar (quedan %v). Requiere renovación.", cleanTarget, remaining.Round(time.Hour))
@@ -244,7 +250,13 @@ func getPersistentCertPaths(cfg *Config) (string, string) {
 		return cfg.TLSCertFile, cfg.TLSKeyFile
 	}
 
+	if fi, err := os.Stat("/var/lib/p2pt"); err == nil && fi.IsDir() {
+		_ = os.MkdirAll("/var/lib/p2pt/certs", 0755)
+	}
+
 	candidates := []string{
+		"/var/lib/p2pt/certs",
+		"/var/lib/p2pt",
 		"/media/mmcblk0p1",
 		"/boot",
 		"/etc/ssl/pingo",

@@ -51,6 +51,7 @@ type Config struct {
 	MinRelayPort   int
 	MaxRelayPort   int
 	EnableTLS      bool
+	DisableTLS     bool
 	TLSCertFile    string
 	TLSKeyFile     string
 	AppPublicURL   string
@@ -710,7 +711,8 @@ func main() {
 	authSecret := flag.String("secret", "pingo-static-auth-secret", "TURN static auth secret")
 	minPort := flag.Int("min-port", 49152, "Minimum UDP relay port")
 	maxPort := flag.Int("max-port", 65535, "Maximum UDP relay port")
-	enableTLS := flag.Bool("tls", false, "Enable TLS for HTTPS/WSS")
+	enableTLS := flag.Bool("tls", false, "Force enable TLS for HTTPS/WSS")
+	noTLS := flag.Bool("no-tls", false, "Disable TLS and run plain HTTP")
 	tlsCert := flag.String("tls-cert", "cert.pem", "TLS Certificate file")
 	tlsKey := flag.String("tls-key", "key.pem", "TLS Private Key file")
 	appURL := flag.String("app-url", "https://estoyqueloleo-max.github.io/p2pt", "Base URL of Pingo app")
@@ -814,6 +816,13 @@ func main() {
 		*mastodonTarget = envMastodonTarget
 	}
 
+	disableTLSVal := *noTLS || os.Getenv("DISABLE_TLS") == "true" || os.Getenv("DISABLE_TLS") == "1"
+	enableTLSVal := !disableTLSVal
+	if *enableTLS {
+		enableTLSVal = true
+		disableTLSVal = false
+	}
+
 	cfg := &Config{
 		HTTPPort:         *httpPort,
 		TURNPort:         *turnPort,
@@ -830,7 +839,8 @@ func main() {
 		AuthSecret:       *authSecret,
 		MinRelayPort:     *minPort,
 		MaxRelayPort:     *maxPort,
-		EnableTLS:        *enableTLS,
+		EnableTLS:        enableTLSVal,
+		DisableTLS:       disableTLSVal,
 		TLSCertFile:      *tlsCert,
 		TLSKeyFile:       *tlsKey,
 		AppPublicURL:     *appURL,
@@ -1789,8 +1799,8 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	// 3. Initialize TLS Certificates (Let's Encrypt via DuckDNS DNS-01 or Local/Self-Signed fallback)
-	if cfg.EnableTLS || cfg.HTTPPort == 443 {
+	// 3. Initialize TLS Certificates (Let's Encrypt via DuckDNS/CloudHub DNS-01 or Local/Self-Signed fallback)
+	if !cfg.DisableTLS {
 		cert, errTLS := EnsureTLSCertificates(cfg)
 		if errTLS == nil {
 			tlsMu.Lock()
@@ -1824,6 +1834,31 @@ func main() {
 	if cfg.EnableAutoUpdate {
 		log.Println("[Updater] Auto-actualizador activado en segundo plano (Revisión cada 12h).")
 		updater.StartBackgroundCheck()
+	}
+
+	// Iniciar tarea de renovación y reintento automático de certificados si se usa Cloud Hub
+	if cfg.DDNSApplianceID != "" && cfg.DDNSSecretToken != "" {
+		go func() {
+			// Comprobar cada hora si no tenemos un certificado válido oficial
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				fullDomain := fmt.Sprintf("%s.appliances.klitosan.com", cfg.DDNSApplianceID)
+				certPath, keyPath := getPersistentCertPaths(cfg)
+				if _, ok := CheckExistingCertValid(certPath, keyPath, fullDomain, 30); !ok {
+					log.Printf("[ACME-CloudHub] Reintentando obtención de certificado Let's Encrypt para %s...", fullDomain)
+					if newCert, err := ObtainOrRenewCloudHubCert(cfg); err == nil {
+						tlsMu.Lock()
+						currentTLSCert = newCert
+						tlsMu.Unlock()
+						cfg.EnableTLS = true
+						log.Printf("[ACME-CloudHub] 🎉 Certificado Let's Encrypt obtenido e instalado en caliente para %s!", fullDomain)
+					} else {
+						log.Printf("[ACME-CloudHub] Reintento no completado: %v", err)
+					}
+				}
+			}
+		}()
 	}
 
 	// Iniciar tarea de renovación automática de certificados si se usa DuckDNS

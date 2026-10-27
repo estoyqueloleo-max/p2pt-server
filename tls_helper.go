@@ -42,12 +42,16 @@ func EnsureTLSCertificates(cfg *Config) (tls.Certificate, error) {
 
 	certPaths := []string{
 		cfg.TLSCertFile,
+		"/var/lib/p2pt/certs/cert.pem",
+		"/var/lib/p2pt/cert.pem",
 		"/media/mmcblk0p1/cert.pem",
 		"/boot/cert.pem",
 		"./cert.pem",
 	}
 	keyPaths := []string{
 		cfg.TLSKeyFile,
+		"/var/lib/p2pt/certs/key.pem",
+		"/var/lib/p2pt/key.pem",
 		"/media/mmcblk0p1/key.pem",
 		"/boot/key.pem",
 		"./key.pem",
@@ -71,7 +75,7 @@ func EnsureTLSCertificates(cfg *Config) (tls.Certificate, error) {
 		}
 	}
 
-	log.Println("[TLS] Generando nuevo certificado SSL/TLS con SANs (nip.io, mDNS, IPs locales)...")
+	log.Println("[TLS] Generando nuevo certificado SSL/TLS con SANs (Cloud Hub, nip.io, mDNS, IPs locales)...")
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("error generando clave privada: %w", err)
@@ -82,11 +86,20 @@ func EnsureTLSCertificates(cfg *Config) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("error generando número de serie: %w", err)
 	}
 
+	commonName := "pingo.local"
+	if cfg.DDNSApplianceID != "" {
+		commonName = fmt.Sprintf("%s.appliances.klitosan.com", cfg.DDNSApplianceID)
+	} else if cfg.DuckDomain != "" {
+		commonName = formatFullDomain(cfg.DuckDomain)
+	} else if cfg.PublicIP != "" && net.ParseIP(cfg.PublicIP) == nil {
+		commonName = cfg.PublicIP
+	}
+
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{"Pingo Appliance Node"},
-			CommonName:   "pingo.local",
+			CommonName:   commonName,
 		},
 		NotBefore:             time.Now().Add(-1 * time.Hour),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
@@ -98,6 +111,14 @@ func EnsureTLSCertificates(cfg *Config) (tls.Certificate, error) {
 	dnsNames := map[string]bool{
 		"localhost":   true,
 		"pingo.local": true,
+	}
+	if cfg.DDNSApplianceID != "" {
+		fullHubDomain := fmt.Sprintf("%s.appliances.klitosan.com", cfg.DDNSApplianceID)
+		dnsNames[fullHubDomain] = true
+		dnsNames["*.appliances.klitosan.com"] = true
+	}
+	if cfg.PublicIP != "" && net.ParseIP(cfg.PublicIP) == nil {
+		dnsNames[cfg.PublicIP] = true
 	}
 	ipList := []net.IP{
 		net.ParseIP("127.0.0.1"),
@@ -147,7 +168,11 @@ func EnsureTLSCertificates(cfg *Config) (tls.Certificate, error) {
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privBytes})
 
-	saveDirs := []string{"/media/mmcblk0p1", "/boot", "/tmp"}
+	if fi, err := os.Stat("/var/lib/p2pt"); err == nil && fi.IsDir() {
+		_ = os.MkdirAll("/var/lib/p2pt/certs", 0755)
+	}
+
+	saveDirs := []string{"/var/lib/p2pt/certs", "/var/lib/p2pt", "/media/mmcblk0p1", "/boot", "/tmp"}
 	for _, dir := range saveDirs {
 		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
 			cFile := filepath.Join(dir, "cert.pem")
