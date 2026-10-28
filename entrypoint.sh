@@ -48,7 +48,7 @@ CFG_EOF
         GTS_PID=$!
         echo "🐘 [Appliance] GoToSocial iniciado con PID $GTS_PID (logs en /var/log/gotosocial.log)"
 
-        # Asegurar auto-creación de cuenta admin si no existe
+        # Asegurar auto-creación de cuenta admin y aplicación OAuth si no existen
         (
             sleep 4
             ADMIN_USER="pingo"
@@ -57,6 +57,11 @@ CFG_EOF
             echo "🐘 [Appliance] Comprobando cuenta admin de GoToSocial..."
             /usr/bin/gotosocial --config-path "$GTS_CONFIG" admin account create --username "$ADMIN_USER" --email "$ADMIN_EMAIL" --password "$ADMIN_PASS" >/dev/null 2>&1 || true
             /usr/bin/gotosocial --config-path "$GTS_CONFIG" admin account promote --username "$ADMIN_USER" >/dev/null 2>&1 || true
+
+            # Pre-registrar cliente OAuth para autorización zero-friction
+            curl -s -X POST -H "Content-Type: application/json" \
+                -d '{"client_name": "PingoAppliance", "redirect_uris": "urn:ietf:wg:oauth:2.0:oob", "scopes": "read write follow"}' \
+                http://127.0.0.1:8080/api/v1/apps >/dev/null 2>&1 || true
         ) &
     else
         echo "⚠️  [Appliance] ENABLE_MASTODON=true pero /usr/bin/gotosocial no fue encontrado."

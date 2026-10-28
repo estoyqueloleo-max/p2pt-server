@@ -182,3 +182,87 @@ func TestGoToSocial_HealthStatus(t *testing.T) {
 		t.Errorf("Expected version '0.17.0', got '%s'", status.Version)
 	}
 }
+
+func TestGoToSocial_MastodonCredentials(t *testing.T) {
+	// Mock GoToSocial responding to OAuth and apps endpoints
+	mockGTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/apps":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"client_id":     "mock_client_id_12345",
+				"client_secret": "mock_client_secret_67890",
+			})
+		case "/oauth/authorize":
+			if r.Method == http.MethodGet {
+				http.SetCookie(w, &http.Cookie{
+					Name:  "gotosocial-mock.appliance",
+					Value: "mock_session_123",
+					Path:  "/",
+				})
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if r.Method == http.MethodPost {
+				w.Header().Set("Location", "urn:ietf:wg:oauth:2.0:oob?code=mock_code_abc123")
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+		case "/auth/sign_in":
+			http.SetCookie(w, &http.Cookie{
+				Name:  "gotosocial-mock.appliance",
+				Value: "mock_auth_456",
+				Path:  "/",
+			})
+			w.WriteHeader(http.StatusFound)
+		case "/oauth/token":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "mock_bearer_token_xyz999",
+				"token_type":   "Bearer",
+				"scope":        "read write follow",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockGTS.Close()
+
+	cfg := &Config{
+		PublicIP:       "mock.appliance",
+		EnableMastodon: true,
+		MastodonTarget: mockGTS.URL,
+	}
+
+	mgr, err := NewGoToSocialManager(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create GoToSocialManager: %v", err)
+	}
+
+	// Request credentials for a peer
+	req := httptest.NewRequest("GET", "/mastodon-credentials?peerId=pingo_peer_test", nil)
+	w := httptest.NewRecorder()
+
+	mgr.HandleMastodonCredentials(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	var data MastodonCredentialsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatalf("Failed to decode response: %v", err)
+	}
+
+	if !data.Enabled {
+		t.Errorf("Expected enabled=true")
+	}
+	if data.Token != "mock_bearer_token_xyz999" {
+		t.Errorf("Expected token 'mock_bearer_token_xyz999', got '%s'", data.Token)
+	}
+	if data.Username != "pingo_peer_test" {
+		t.Errorf("Expected username 'pingo_peer_test', got '%s'", data.Username)
+	}
+}
+
