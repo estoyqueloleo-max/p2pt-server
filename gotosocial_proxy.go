@@ -278,6 +278,93 @@ type MastodonCredentialsResponse struct {
 	Claimed     bool   `json:"claimed"`
 }
 
+// GoToSocialUser represents a local Fediverse user registered on the appliance
+type GoToSocialUser struct {
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name"`
+	Statuses    int       `json:"statuses"`
+	CreatedAt   string    `json:"created_at"`
+	ProfileURL  string    `json:"profile_url"`
+	HasToken    bool      `json:"has_token"`
+	IsAdmin     bool      `json:"is_admin"`
+}
+
+// GetLocalUsers queries the SQLite database directly to list all local accounts for the Dashboard
+func (m *GoToSocialManager) GetLocalUsers() []GoToSocialUser {
+	var dbPath string
+	candidates := []string{
+		"/var/lib/p2pt/gotosocial/sqlite/sqlite.db",
+		"./data/gotosocial/sqlite/sqlite.db",
+		"/mnt/data/gotosocial/database.sqlite",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			dbPath = p
+			break
+		}
+	}
+	if dbPath == "" {
+		return nil
+	}
+
+	cmd := exec.Command("sqlite3", "-separator", "|", dbPath,
+		`SELECT accounts.username, COALESCE(accounts.display_name, accounts.username), COALESCE(account_stats.statuses_count, 0), accounts.created_at, COALESCE(accounts.url, ''), COALESCE(tokens.access, '') `+
+			`FROM accounts `+
+			`LEFT JOIN account_stats ON account_stats.account_id = accounts.id `+
+			`LEFT JOIN users ON users.account_id = accounts.id `+
+			`LEFT JOIN tokens ON tokens.user_id = users.id `+
+			`WHERE accounts.domain IS NULL `+
+			`GROUP BY accounts.username;`)
+
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	var users []GoToSocialUser
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) < 5 {
+			continue
+		}
+		username := parts[0]
+		// Skip instance pseudo-account
+		if strings.Contains(username, ".") {
+			continue
+		}
+		displayName := parts[1]
+		var statuses int
+		if s, err := fmt.Sscanf(parts[2], "%d", &statuses); err == nil && s > 0 {
+			// parsed ok
+		}
+		createdAt := parts[3]
+		if len(createdAt) >= 10 {
+			createdAt = createdAt[:10]
+		}
+		profileURL := parts[4]
+		hasToken := false
+		if len(parts) >= 6 && strings.TrimSpace(parts[5]) != "" {
+			hasToken = true
+		}
+
+		users = append(users, GoToSocialUser{
+			Username:    username,
+			DisplayName: displayName,
+			Statuses:    statuses,
+			CreatedAt:   createdAt,
+			ProfileURL:  profileURL,
+			HasToken:    hasToken,
+			IsAdmin:     username == "pingo",
+		})
+	}
+	return users
+}
+
 // sanitizePeerUsername converts peerId or user to a safe GoToSocial username (alphanumeric, lower, underscores)
 func sanitizePeerUsername(peerID string) string {
 	peerID = strings.ToLower(strings.TrimSpace(peerID))

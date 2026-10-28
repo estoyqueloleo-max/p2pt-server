@@ -1701,7 +1701,7 @@ func main() {
 				authMgr.RenderLoginPage(w, r, "")
 				return
 			}
-			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, cloudHubMgr, tracker, turnMonitor, gitServer, pushMgr)
+			renderDashboard(w, r, cfg, sigServer, upnpMgr, duckMgr, cloudHubMgr, tracker, turnMonitor, gitServer, pushMgr, gtsMgr)
 			return
 		}
 
@@ -2044,7 +2044,7 @@ func printBanner(cfg *Config, pairURL, shortPairURL, configJSON string, upnp *UP
 	fmt.Println("==================================================================")
 }
 
-func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, cloudHubMgr *CloudHubDDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor, gitServer *GitServer, pushMgr *PushManager) {
+func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigServer *SignalingServer, upnpMgr *UPnPManager, duckMgr *DuckDNSManager, cloudHubMgr *CloudHubDDNSManager, tracker *WebTorrentTracker, turnMonitor *TurnMonitor, gitServer *GitServer, pushMgr *PushManager, gtsMgr *GoToSocialManager) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	currentWiFiSSID := ""
@@ -2294,6 +2294,74 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 				</table>
 			</div>
 		</div>`, len(pushSubs), pushRows.String()))
+	}
+
+	var mastodonSectionHTML strings.Builder
+	if gtsMgr != nil && cfg.EnableMastodon {
+		gtsUsers := gtsMgr.GetLocalUsers()
+		gtsStatus := gtsMgr.GetStatus(r.Context())
+		var mRows strings.Builder
+		if len(gtsUsers) == 0 {
+			mRows.WriteString(`<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:14px;">No hay cuentas federadas activas aún. Se auto-aprovisionan al interactuar o compartir una ruta en Mastodon.</td></tr>`)
+		} else {
+			for _, u := range gtsUsers {
+				roleBadge := `<span class="badge badge-info">👤 Peer User</span>`
+				if u.IsAdmin {
+					roleBadge = `<span class="badge badge-warning" style="background:rgba(234,179,8,0.2); color:#facc15;">⭐ Admin</span>`
+				}
+				tokenBadge := `<span style="color:#ef4444; font-size:0.75rem;">Sin Token</span>`
+				if u.HasToken {
+					tokenBadge = `<span style="color:#10b981; font-size:0.75rem;">🟢 OAuth Activo</span>`
+				}
+				profileLink := fmt.Sprintf(`<a href="/@%s" target="_blank" style="color:#38bdf8; text-decoration:none;">/@%s ↗</a>`, u.Username, u.Username)
+
+				mRows.WriteString(fmt.Sprintf(`<tr>
+					<td style="padding:10px; font-family:monospace; color:var(--accent);"><b>@%s</b><br/><span style="font-size:0.75rem; color:var(--text-muted);">%s</span></td>
+					<td style="padding:10px;">%s</td>
+					<td style="padding:10px; color:var(--text-muted);">%d posts</td>
+					<td style="padding:10px;">%s</td>
+					<td style="padding:10px;">%s</td>
+				</tr>`, u.Username, u.DisplayName, roleBadge, u.Statuses, tokenBadge, profileLink))
+			}
+		}
+
+		statusDot := "🟢"
+		if !gtsStatus.Running {
+			statusDot = "🔴"
+		}
+
+		mastodonSectionHTML.WriteString(fmt.Sprintf(`
+		<div class="card" style="margin-top:20px;">
+			<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:10px;">
+				<h3 style="margin:0; display:flex; align-items:center; gap:8px;">
+					<span>🐘 Fediverso / Mastodon (GoToSocial)</span>
+					<span class="badge badge-info">%d Cuentas Locales</span>
+				</h3>
+				<div style="display:flex; gap:8px;">
+					<a href="/admin" target="_blank" class="btn btn-secondary" style="padding:5px 12px; font-size:0.8rem; text-decoration:none;">⚙️ Admin GoToSocial</a>
+					<a href="/@pingo" target="_blank" class="btn btn-secondary" style="padding:5px 12px; font-size:0.8rem; text-decoration:none;">🌐 Ver Perfil @pingo</a>
+				</div>
+			</div>
+			<p style="margin:0 0 14px 0; color:var(--text-muted); font-size:0.85rem;">
+				Servicio federado ActivityPub compatible con Mastodon. Estado del daemon local: <b>%s %s</b>. Los peers obtienen automáticamente cuentas y tokens OAuth sin registro manual al compartir rutas.
+			</p>
+			<div style="overflow-x:auto;">
+				<table style="width:100%%; border-collapse:collapse; text-align:left; font-size:0.85rem;">
+					<thead>
+						<tr style="border-bottom:1px solid rgba(255,255,255,0.1); color:var(--text-muted);">
+							<th style="padding:8px 10px;">Usuario Fediverso</th>
+							<th style="padding:8px 10px;">Rol</th>
+							<th style="padding:8px 10px;">Actividad</th>
+							<th style="padding:8px 10px;">Token OAuth</th>
+							<th style="padding:8px 10px;">Perfil Web</th>
+						</tr>
+					</thead>
+					<tbody>
+						%s
+					</tbody>
+				</table>
+			</div>
+		</div>`, len(gtsUsers), statusDot, gtsStatus.Message, mRows.String()))
 	}
 
 	qrTarget := shortPairURL
@@ -2747,6 +2815,8 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
             </div>
             %s
         </div>
+
+        %s
 
         %s
 
@@ -3290,6 +3360,7 @@ func renderDashboard(w http.ResponseWriter, r *http.Request, cfg *Config, sigSer
 		blockedSectionHTML.String(),
 		gitSectionHTML.String(),
 		pushSectionHTML.String(),
+		mastodonSectionHTML.String(),
 		string(configJSONBytes),
 		pairURL,
 		shortPairURL,
