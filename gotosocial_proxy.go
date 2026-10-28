@@ -232,6 +232,9 @@ port: %d
 
 trusted-proxies:
   - "127.0.0.1/32"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "10.0.0.0/8"
   - "::1"
 
 # Database (Lightweight SQLite for embedded / RPi)
@@ -271,11 +274,13 @@ log-level: "info"
 
 // MastodonCredentialsResponse returned to clients for zero-friction Mastodon access
 type MastodonCredentialsResponse struct {
-	Enabled     bool   `json:"enabled"`
-	InstanceURL string `json:"instanceUrl"`
-	Username    string `json:"username"`
-	Token       string `json:"token"`
-	Claimed     bool   `json:"claimed"`
+	Enabled         bool   `json:"enabled"`
+	InstanceURL     string `json:"instanceUrl"`
+	Username        string `json:"username"`
+	Email           string `json:"email"`
+	InitialPassword string `json:"initialPassword"`
+	Token           string `json:"token"`
+	Claimed         bool   `json:"claimed"`
 }
 
 // GoToSocialUser represents a local Fediverse user registered on the appliance
@@ -453,12 +458,17 @@ func (m *GoToSocialManager) HandleMastodonCredentials(w http.ResponseWriter, r *
 		return
 	}
 
+	initialPass := fmt.Sprintf("P1ng0_%s#2026!", user)
+	email := fmt.Sprintf("%s@%s", user, publicHost)
+
 	resp := MastodonCredentialsResponse{
-		Enabled:     true,
-		InstanceURL: instanceURL,
-		Username:    user,
-		Token:       token,
-		Claimed:     true,
+		Enabled:         true,
+		InstanceURL:     instanceURL,
+		Username:        user,
+		Email:           email,
+		InitialPassword: initialPass,
+		Token:           token,
+		Claimed:         true,
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
@@ -679,5 +689,148 @@ func (m *GoToSocialManager) ensureOAuthApp(ctx context.Context) (string, string,
 
 	// Fallback to existing application
 	return "016EXE5M7QASEY5GTWT27MCNQ2", "a1953b33-6ac8-46f9-9632-dc0c203ab67a", nil
+}
+
+// HandlePhanpySSO redirects to Phanpy passing an authorization code for zero-friction login
+func (m *GoToSocialManager) HandlePhanpySSO(w http.ResponseWriter, r *http.Request) {
+	peerID := strings.TrimSpace(r.URL.Query().Get("peerId"))
+	if peerID == "" {
+		peerID = strings.TrimSpace(r.URL.Query().Get("user"))
+	}
+	if peerID == "" {
+		http.Error(w, "peerId es requerido", http.StatusBadRequest)
+		return
+	}
+
+	username := sanitizePeerUsername(peerID)
+	publicHost := m.cfg.GetPublicIP()
+	password := fmt.Sprintf("P1ng0_%s#2026!", username)
+	email := fmt.Sprintf("%s@%s", username, publicHost)
+
+	// Register/ensure Phanpy OAuth client for redirection
+	phanpyRedirectURI := "https://phanpy.social/"
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	target := m.targetURL.String()
+
+	// 1. Create/find application for Phanpy
+	appURL := fmt.Sprintf("%s/api/v1/apps", target)
+	appForm := url.Values{}
+	appForm.Set("client_name", "Phanpy")
+	appForm.Set("redirect_uris", phanpyRedirectURI)
+	appForm.Set("scopes", "read write follow push")
+
+	var clientID string
+	appReq, err := http.NewRequestWithContext(r.Context(), "POST", appURL, strings.NewReader(appForm.Encode()))
+	if err == nil {
+		appReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		appResp, err := client.Do(appReq)
+		if err == nil {
+			var appData struct {
+				ClientID string `json:"client_id"`
+			}
+			_ = json.NewDecoder(appResp.Body).Decode(&appData)
+			appResp.Body.Close()
+			clientID = appData.ClientID
+		}
+	}
+	if clientID == "" {
+		// Fallback to direct phanpy without code if error
+		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		return
+	}
+
+	// 2. Perform step A: GET /oauth/authorize for cookie
+	authURL := fmt.Sprintf("%s/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=read+write+follow+push",
+		target, url.QueryEscape(clientID), url.QueryEscape(phanpyRedirectURI))
+	req1, err := http.NewRequestWithContext(r.Context(), "GET", authURL, nil)
+	if err != nil {
+		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		return
+	}
+	req1.Host = publicHost
+	resp1, err := client.Do(req1)
+	if err != nil {
+		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		return
+	}
+	resp1.Body.Close()
+
+	var sessionCookie string
+	for _, c := range resp1.Cookies() {
+		if strings.HasPrefix(c.Name, "gotosocial-") {
+			sessionCookie = c.String()
+			break
+		}
+	}
+	if sessionCookie == "" && resp1.Header.Get("Set-Cookie") != "" {
+		sessionCookie = resp1.Header.Get("Set-Cookie")
+	}
+
+	// 3. Step B: POST /auth/sign_in
+	signInURL := fmt.Sprintf("%s/auth/sign_in", target)
+	signInForm := url.Values{}
+	signInForm.Set("username", email)
+	signInForm.Set("password", password)
+
+	req2, _ := http.NewRequestWithContext(r.Context(), "POST", signInURL, strings.NewReader(signInForm.Encode()))
+	req2.Host = publicHost
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if sessionCookie != "" {
+		req2.Header.Set("Cookie", sessionCookie)
+	}
+	resp2, err := client.Do(req2)
+	if err != nil {
+		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		return
+	}
+	resp2.Body.Close()
+
+	var authCookie string
+	for _, c := range resp2.Cookies() {
+		if strings.HasPrefix(c.Name, "gotosocial-") {
+			authCookie = c.String()
+			break
+		}
+	}
+	if authCookie == "" {
+		authCookie = sessionCookie
+	}
+
+	// 4. Step C: POST /oauth/authorize for authorization code
+	authApproveURL := fmt.Sprintf("%s/oauth/authorize", target)
+	authForm := url.Values{}
+	authForm.Set("client_id", clientID)
+	authForm.Set("redirect_uri", phanpyRedirectURI)
+	authForm.Set("response_type", "code")
+	authForm.Set("scope", "read write follow push")
+
+	req3, _ := http.NewRequestWithContext(r.Context(), "POST", authApproveURL, strings.NewReader(authForm.Encode()))
+	req3.Host = publicHost
+	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if authCookie != "" {
+		req3.Header.Set("Cookie", authCookie)
+	}
+	resp3, err := client.Do(req3)
+	if err != nil {
+		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		return
+	}
+	resp3.Body.Close()
+
+	loc := resp3.Header.Get("Location")
+	if strings.Contains(loc, "code=") {
+		// Successful auto-authorization: redirect to Phanpy with code!
+		log.Printf("[GoToSocial] 🚀 Zero-click SSO emitido para @%s hacia Phanpy", username)
+		http.Redirect(w, r, loc, http.StatusFound)
+		return
+	}
+
+	// Fallback to standard Phanpy instance url
+	http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
 }
 

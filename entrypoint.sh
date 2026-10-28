@@ -24,6 +24,9 @@ bind-address: "127.0.0.1"
 port: 8080
 trusted-proxies:
   - "127.0.0.1/32"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "10.0.0.0/8"
   - "::1"
 db-type: "sqlite"
 db-address: "${GTS_DATA_DIR}/sqlite/sqlite.db"

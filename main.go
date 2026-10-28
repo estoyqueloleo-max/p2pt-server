@@ -1135,7 +1135,8 @@ func main() {
 			mux.HandleFunc("/inbox", gtsMgr.ServeHTTP)
 			mux.HandleFunc("/outbox", gtsMgr.ServeHTTP)
 			mux.HandleFunc("/mastodon-credentials", gtsMgr.HandleMastodonCredentials)
-			log.Printf("[GoToSocial] 🐘 Reverse proxy Mastodon/ActivityPub activo hacia %s (credenciales en /mastodon-credentials)", cfg.MastodonTarget)
+			mux.HandleFunc("/fediverse/sso", gtsMgr.HandlePhanpySSO)
+			log.Printf("[GoToSocial] 🐘 Reverse proxy Mastodon/ActivityPub activo hacia %s (credenciales en /mastodon-credentials, SSO en /fediverse/sso)", cfg.MastodonTarget)
 		}
 	}
 
