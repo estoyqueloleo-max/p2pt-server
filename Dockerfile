@@ -46,6 +46,14 @@ COPY --from=builder /p2pt-server /usr/bin/p2pt-server
 COPY dist* /usr/share/pingo/web/
 COPY dist* /var/lib/p2pt/web/
 
+# Copiar GoToSocial oficial (binario y plantillas web) desde la imagen oficial multi-arquitectura
+COPY --from=superseriousbusiness/gotosocial:latest /gotosocial/gotosocial /usr/bin/gotosocial
+COPY --from=superseriousbusiness/gotosocial:latest /gotosocial/web /usr/share/gotosocial/web
+
+# Copiar script de arranque (entrypoint) que orquesta gotosocial + p2pt-server
+COPY entrypoint.sh /usr/bin/entrypoint.sh
+RUN chmod +x /usr/bin/entrypoint.sh
+
 # Variables de entorno predeterminadas
 ENV PORT=443 \
     TURN_PORT=3478 \
@@ -67,4 +75,4 @@ EXPOSE 443/tcp 3478/udp 3478/tcp
 
 WORKDIR /var/lib/p2pt
 
-ENTRYPOINT ["/usr/bin/p2pt-server"]
+ENTRYPOINT ["/usr/bin/entrypoint.sh"]
