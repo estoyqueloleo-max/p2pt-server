@@ -52,7 +52,7 @@ CFG_EOF
         (
             sleep 4
             ADMIN_USER="pingo"
-            ADMIN_PASS="${ADMIN_PASSWORD:-adminsecret}"
+            ADMIN_PASS="${ADMIN_PASSWORD:-P1ng0_S3cr3t#2026!}"
             ADMIN_EMAIL="admin@${PUBLIC_HOST}"
             echo "🐘 [Appliance] Comprobando cuenta admin de GoToSocial..."
             /usr/bin/gotosocial --config-path "$GTS_CONFIG" admin account create --username "$ADMIN_USER" --email "$ADMIN_EMAIL" --password "$ADMIN_PASS" >/dev/null 2>&1 || true
