@@ -12,8 +12,8 @@ REGISTRY="${DOCKER_REGISTRY:-192.168.1.4:5000}"
 IMAGE_NAME="${DOCKER_IMAGE_NAME:-pingo/server}"
 BUILDER_NAME="pingo-multiarch-builder"
 
-# Detectar versión del tag de git o usar v1.4.2 por defecto
-VERSION=$(git -C "${SCRIPT_DIR}/.." describe --tags --abbrev=0 2>/dev/null || echo "v1.4.2")
+# Detectar versión del argumento, del tag de git o usar v1.6.3 por defecto
+VERSION="${1:-$(git -C "${SCRIPT_DIR}/.." describe --tags --abbrev=0 2>/dev/null || echo "v1.6.3")}"
 
 echo "🚀 Iniciando build multi-arquitectura para Pingo Server [${VERSION}]..."
 echo "📍 Registro destino: ${REGISTRY}/${IMAGE_NAME}"

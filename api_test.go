@@ -141,11 +141,18 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 		t.Fatalf("Failed to write mock app.js: %v", err)
 	}
 
+	phanpyDir := t.TempDir()
+	phanpyIndex := filepath.Join(phanpyDir, "index.html")
+	if err := os.WriteFile(phanpyIndex, []byte("<html><body>Phanpy Fediverse Web Client</body></html>"), 0644); err != nil {
+		t.Fatalf("Failed to write mock phanpy index.html: %v", err)
+	}
+
 	cfg := &Config{
-		HTTPPort: 9000,
-		TURNPort: 3478,
-		PublicIP: "pingo.appliance.local",
-		WebDir:   tmpDir,
+		HTTPPort:  9000,
+		TURNPort:  3478,
+		PublicIP:  "pingo.appliance.local",
+		WebDir:    tmpDir,
+		PhanpyDir: phanpyDir,
 	}
 
 	mux := http.NewServeMux()
@@ -200,6 +207,34 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		if path == "/phanpy" {
+			target := "/phanpy/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		if strings.HasPrefix(path, "/phanpy/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			subPath := strings.TrimPrefix(path, "/phanpy/")
+			subPath = strings.TrimPrefix(subPath, "/")
+			if subPath == "" {
+				subPath = "index.html"
+			}
+			targetFile := filepath.Join(cfg.PhanpyDir, subPath)
+			if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, targetFile)
+				return
+			}
+			fallbackIndex := filepath.Join(cfg.PhanpyDir, "index.html")
+			if _, err := os.Stat(fallbackIndex); err == nil {
+				http.ServeFile(w, r, fallbackIndex)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
 		http.NotFound(w, r)
 	})
 
@@ -233,6 +268,22 @@ func TestAPI_WebFrontendServing(t *testing.T) {
 	mux.ServeHTTP(recAssets, reqAssets)
 	if recAssets.Code != http.StatusOK || !strings.Contains(recAssets.Body.String(), "console.log('pingo')") {
 		t.Fatalf("Expected 200 and asset content for /assets/app.js, got %d", recAssets.Code)
+	}
+
+	// Test 1d: GET /phanpy redirects with 301 to /phanpy/
+	reqPhanpy := httptest.NewRequest("GET", "/phanpy", nil)
+	recPhanpy := httptest.NewRecorder()
+	mux.ServeHTTP(recPhanpy, reqPhanpy)
+	if recPhanpy.Code != http.StatusMovedPermanently || recPhanpy.Header().Get("Location") != "/phanpy/" {
+		t.Fatalf("Expected 301 redirect for /phanpy to /phanpy/, got code %d loc '%s'", recPhanpy.Code, recPhanpy.Header().Get("Location"))
+	}
+
+	// Test 1e: GET /phanpy/ returns Phanpy index.html
+	reqPhanpySlash := httptest.NewRequest("GET", "/phanpy/", nil)
+	recPhanpySlash := httptest.NewRecorder()
+	mux.ServeHTTP(recPhanpySlash, reqPhanpySlash)
+	if recPhanpySlash.Code != http.StatusOK || !strings.Contains(recPhanpySlash.Body.String(), "Phanpy Fediverse Web Client") {
+		t.Fatalf("Expected 200 and Phanpy content for /phanpy/, got code %d body '%s'", recPhanpySlash.Code, recPhanpySlash.Body.String())
 	}
 
 	// Test 2: SPA deep link /web/room/123

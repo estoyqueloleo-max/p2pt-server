@@ -61,6 +61,7 @@ type Config struct {
 	GitDir         string
 	GitRepo        string
 	WebDir         string
+	PhanpyDir      string
 	EnableMastodon bool
 	MastodonTarget string
 	DDNSApplianceID string
@@ -148,7 +149,9 @@ func (s *SignalingServer) AddClient(id, token string, conn *websocket.Conn) *Cli
 	// If client exists, close old connection
 	if old, exists := s.clients[id]; exists {
 		old.mu.Lock()
-		_ = old.Conn.Close()
+		if old.Conn != nil {
+			_ = old.Conn.Close()
+		}
 		old.mu.Unlock()
 	}
 
@@ -727,6 +730,7 @@ func main() {
 	gitDir := flag.String("git-dir", "", "Directory for hosted Git repositories (default: /var/lib/p2pt/repos or ./data/repos)")
 	gitRepo := flag.String("git-repo", "routes", "Default hosted repository name (e.g. 'routes' or 'data')")
 	webDir := flag.String("web-dir", "", "Directory containing compiled frontend static files to serve on /web (default: ./dist or /var/lib/p2pt/web)")
+	phanpyDir := flag.String("phanpy-dir", "", "Directory containing compiled Phanpy web client static files to serve on /phanpy (default: /usr/share/pingo/phanpy or /var/lib/p2pt/phanpy)")
 	enableMastodon := flag.Bool("mastodon", false, "Enable GoToSocial ActivityPub / Mastodon reverse proxy")
 	mastodonTarget := flag.String("mastodon-target", "http://127.0.0.1:8080", "Target address for GoToSocial backend")
 
@@ -775,6 +779,9 @@ func main() {
 	}
 	if envWebDir := os.Getenv("WEB_DIR"); envWebDir != "" {
 		*webDir = envWebDir
+	}
+	if envPhanpyDir := os.Getenv("PHANPY_DIR"); envPhanpyDir != "" {
+		*phanpyDir = envPhanpyDir
 	}
 	if envAppURL := os.Getenv("APP_URL"); envAppURL != "" {
 		*appURL = envAppURL
@@ -850,6 +857,7 @@ func main() {
 		GitDir:           *gitDir,
 		GitRepo:          *gitRepo,
 		WebDir:           *webDir,
+		PhanpyDir:        *phanpyDir,
 		EnableMastodon:   *enableMastodon,
 		MastodonTarget:   *mastodonTarget,
 		DDNSApplianceID:  os.Getenv("DDNS_APPLIANCE_ID"),
@@ -1118,6 +1126,7 @@ func main() {
 		if err != nil {
 			log.Printf("[GoToSocial] ⚠️ Error inicializando proxy GoToSocial: %v", err)
 		} else {
+			gtsMgr.SetSignalingServer(sigServer)
 			for _, confPath := range []string{"/etc/gotosocial/config.yaml", "./data/gotosocial/config.yaml"} {
 				_ = EnsureGoToSocialConfigFile(cfg, confPath)
 			}
@@ -1783,6 +1792,65 @@ func main() {
 					http.ServeFile(w, r, fallbackIndex)
 					return
 				}
+			}
+
+			http.NotFound(w, r)
+			return
+		}
+
+		// Redirección limpia de /phanpy a /phanpy/ para garantizar resolución de rutas relativas (./assets/...)
+		if path == "/phanpy" {
+			target := "/phanpy/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+
+		// Servir cliente Web Phanpy (Mastodon / Fediverse) bajo /phanpy/
+		if strings.HasPrefix(path, "/phanpy/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			resolvedPhanpyDir := cfg.PhanpyDir
+			if resolvedPhanpyDir == "" {
+				candidates := []string{
+					"/usr/share/pingo/phanpy",
+					"/var/lib/p2pt/phanpy",
+					"./dist-phanpy",
+					"../dist-phanpy",
+					"./phanpy/dist",
+					"../phanpy/dist",
+				}
+				for _, c := range candidates {
+					if info, err := os.Stat(c); err == nil && info.IsDir() {
+						resolvedPhanpyDir = c
+						break
+					}
+				}
+			}
+
+			if resolvedPhanpyDir == "" {
+				http.Error(w, "Phanpy web client dist not found on appliance. Build phanpy or set PHANPY_DIR.", http.StatusNotFound)
+				return
+			}
+
+			subPath := strings.TrimPrefix(path, "/phanpy/")
+			subPath = strings.TrimPrefix(subPath, "/")
+			if subPath == "" {
+				subPath = "index.html"
+			}
+
+			targetFile := filepath.Join(resolvedPhanpyDir, subPath)
+			if info, err := os.Stat(targetFile); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, targetFile)
+				return
+			}
+
+			// SPA Fallback para rutas de Phanpy (habitualmente hash-based, pero por si usa HTML5 history / deep links)
+			fallbackIndex := filepath.Join(resolvedPhanpyDir, "index.html")
+			if _, err := os.Stat(fallbackIndex); err == nil {
+				http.ServeFile(w, r, fallbackIndex)
+				return
 			}
 
 			http.NotFound(w, r)

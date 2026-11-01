@@ -266,3 +266,90 @@ func TestGoToSocial_MastodonCredentials(t *testing.T) {
 	}
 }
 
+func TestGoToSocial_PhanpySSO_TokenValidation(t *testing.T) {
+	// Mock GoToSocial responding to OAuth and apps endpoints
+	mockGTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/apps":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"client_id":     "mock_client_id_12345",
+				"client_secret": "mock_client_secret_67890",
+			})
+		case "/oauth/authorize":
+			http.SetCookie(w, &http.Cookie{
+				Name:  "gotosocial-mock.appliance",
+				Value: "mock_session_123",
+				Path:  "/",
+			})
+			w.WriteHeader(http.StatusOK)
+		case "/auth/sign_in":
+			http.SetCookie(w, &http.Cookie{
+				Name:  "gotosocial-mock.appliance",
+				Value: "mock_auth_456",
+				Path:  "/",
+			})
+			w.WriteHeader(http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockGTS.Close()
+
+	cfg := &Config{
+		PublicIP:       "mock.appliance",
+		EnableMastodon: true,
+		MastodonTarget: mockGTS.URL,
+	}
+
+	mgr, err := NewGoToSocialManager(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create GoToSocialManager: %v", err)
+	}
+
+	sigServer := NewSignalingServer(cfg)
+	mgr.SetSignalingServer(sigServer)
+
+	// Register a client with valid token
+	peerID := "peer_alice_123"
+	peerToken := "token_secret_xyz"
+	sigServer.AddClient(peerID, peerToken, nil)
+
+	// Case 1: Unknown peer -> 403 Forbidden
+	req1 := httptest.NewRequest("GET", "/fediverse/sso?peerId=unknown_peer&token=whatever", nil)
+	w1 := httptest.NewRecorder()
+	mgr.HandlePhanpySSO(w1, req1)
+	if w1.Result().StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 Forbidden for unknown peer, got %d", w1.Result().StatusCode)
+	}
+
+	// Case 2: Registered peer without token -> 403 Forbidden
+	req2 := httptest.NewRequest("GET", "/fediverse/sso?peerId="+peerID, nil)
+	w2 := httptest.NewRecorder()
+	mgr.HandlePhanpySSO(w2, req2)
+	if w2.Result().StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 Forbidden for missing token, got %d", w2.Result().StatusCode)
+	}
+
+	// Case 3: Registered peer with wrong token -> 403 Forbidden
+	req3 := httptest.NewRequest("GET", "/fediverse/sso?peerId="+peerID+"&token=wrong_token", nil)
+	w3 := httptest.NewRecorder()
+	mgr.HandlePhanpySSO(w3, req3)
+	if w3.Result().StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 Forbidden for wrong token, got %d", w3.Result().StatusCode)
+	}
+
+	// Case 4: Registered peer with valid token -> Redirect (302 Found)
+	req4 := httptest.NewRequest("GET", "/fediverse/sso?peerId="+peerID+"&token="+peerToken, nil)
+	w4 := httptest.NewRecorder()
+	mgr.HandlePhanpySSO(w4, req4)
+	if w4.Result().StatusCode != http.StatusFound {
+		t.Errorf("Expected 302 Found for valid token, got %d", w4.Result().StatusCode)
+	}
+	loc := w4.Result().Header.Get("Location")
+	if !strings.Contains(loc, "/phanpy/") {
+		t.Errorf("Expected first-party redirect to /phanpy/, got %s", loc)
+	}
+}
+
+

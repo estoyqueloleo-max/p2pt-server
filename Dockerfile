@@ -24,6 +24,17 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -ldflags="-s -w" -o /p2pt-server .
 
 # ------------------------------------------------------------------------------
+# Stage: Build Phanpy client statically from official source
+# ------------------------------------------------------------------------------
+FROM node:22-alpine AS phanpy-builder
+WORKDIR /build
+RUN apk add --no-cache git
+RUN git clone --depth 1 https://github.com/cheeaun/phanpy.git .
+RUN npm ci || npm install
+ENV PHANPY_CLIENT_NAME="Pingo Fediverse (Phanpy)"
+RUN npm run build
+
+# ------------------------------------------------------------------------------
 # Runtime Image
 # ------------------------------------------------------------------------------
 FROM alpine:3.19
@@ -37,7 +48,7 @@ RUN apk add --no-cache \
     tzdata
 
 # Estructura de directorios estándar de la appliance
-RUN mkdir -p /var/lib/p2pt/repos /var/lib/p2pt/web /usr/share/pingo/web /etc/p2pt /var/log
+RUN mkdir -p /var/lib/p2pt/repos /var/lib/p2pt/web /var/lib/p2pt/phanpy /usr/share/pingo/web /usr/share/pingo/phanpy /etc/p2pt /var/log
 
 # Copiar binario compilado
 COPY --from=builder /p2pt-server /usr/bin/p2pt-server
@@ -45,6 +56,10 @@ COPY --from=builder /p2pt-server /usr/bin/p2pt-server
 # Copiar frontend estático tanto a /usr/share/pingo/web (inmutable, no afectado por volumen) como a /var/lib/p2pt/web
 COPY dist* /usr/share/pingo/web/
 COPY dist* /var/lib/p2pt/web/
+
+# Copiar cliente web Phanpy compilado en la etapa multistage
+COPY --from=phanpy-builder /build/dist /usr/share/pingo/phanpy/
+COPY --from=phanpy-builder /build/dist /var/lib/p2pt/phanpy/
 
 # Copiar GoToSocial oficial (binario y plantillas web) desde la imagen oficial multi-arquitectura
 COPY --from=superseriousbusiness/gotosocial:latest /gotosocial/gotosocial /usr/bin/gotosocial
@@ -63,7 +78,8 @@ ENV PORT=443 \
     ENABLE_MDNS=false \
     ENABLE_GIT=true \
     GIT_DIR=/var/lib/p2pt/repos \
-    WEB_DIR=/usr/share/pingo/web
+    WEB_DIR=/usr/share/pingo/web \
+    PHANPY_DIR=/usr/share/pingo/phanpy
 
 # Persistencia para repositorios Git y base de datos/tokens
 VOLUME ["/var/lib/p2pt"]

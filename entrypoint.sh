@@ -4,7 +4,15 @@ set -e
 # ==============================================================================
 # Pingo Appliance - Docker Container Entrypoint
 # Runs GoToSocial daemon (if enabled) + Pingo Standalone Server
-# ==============================================================================
+# Asegurar que los frontends estáticos inmutables de la imagen se sincronicen en el volumen persistente
+if [ -d "/usr/share/pingo/phanpy" ]; then
+    mkdir -p /var/lib/p2pt/phanpy
+    cp -r /usr/share/pingo/phanpy/* /var/lib/p2pt/phanpy/ 2>/dev/null || true
+fi
+if [ -d "/usr/share/pingo/web" ]; then
+    mkdir -p /var/lib/p2pt/web
+    cp -r /usr/share/pingo/web/* /var/lib/p2pt/web/ 2>/dev/null || true
+fi
 
 # Si ENABLE_MASTODON está activado y el binario de GoToSocial existe
 if [ "$ENABLE_MASTODON" = "true" ] || [ "$ENABLE_MASTODON" = "1" ]; then
@@ -25,6 +33,8 @@ port: 8080
 trusted-proxies:
   - "127.0.0.1/32"
   - "172.16.0.0/12"
+  - "172.17.0.0/16"
+  - "172.17.0.1/16"
   - "192.168.0.0/16"
   - "10.0.0.0/8"
   - "::1"
@@ -61,9 +71,13 @@ CFG_EOF
             /usr/bin/gotosocial --config-path "$GTS_CONFIG" admin account create --username "$ADMIN_USER" --email "$ADMIN_EMAIL" --password "$ADMIN_PASS" >/dev/null 2>&1 || true
             /usr/bin/gotosocial --config-path "$GTS_CONFIG" admin account promote --username "$ADMIN_USER" >/dev/null 2>&1 || true
 
-            # Pre-registrar cliente OAuth para autorización zero-friction
+            # Pre-registrar cliente OAuth para autorización zero-friction (Pingo + Phanpy local)
             curl -s -X POST -H "Content-Type: application/json" \
                 -d '{"client_name": "PingoAppliance", "redirect_uris": "urn:ietf:wg:oauth:2.0:oob", "scopes": "read write follow"}' \
+                http://127.0.0.1:8080/api/v1/apps >/dev/null 2>&1 || true
+
+            curl -s -X POST -H "Content-Type: application/json" \
+                -d "{\"client_name\": \"Phanpy\", \"redirect_uris\": \"https://${PUBLIC_HOST}/phanpy/\", \"scopes\": \"read write follow push\"}" \
                 http://127.0.0.1:8080/api/v1/apps >/dev/null 2>&1 || true
         ) &
     else

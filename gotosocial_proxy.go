@@ -19,11 +19,19 @@ import (
 
 // GoToSocialManager handles reverse proxying, health checking and configuration for GoToSocial
 type GoToSocialManager struct {
-	cfg          *Config
-	targetURL    *url.URL
-	reverseProxy *httputil.ReverseProxy
-	httpClient   *http.Client
-	mu           sync.RWMutex
+	cfg             *Config
+	targetURL       *url.URL
+	reverseProxy    *httputil.ReverseProxy
+	httpClient      *http.Client
+	signalingServer *SignalingServer
+	mu              sync.RWMutex
+}
+
+// SetSignalingServer attaches the PeerJS signaling server instance for peer validation
+func (m *GoToSocialManager) SetSignalingServer(sig *SignalingServer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.signalingServer = sig
 }
 
 // GoToSocialStatus represents the health and federation state of GoToSocial
@@ -233,6 +241,8 @@ port: %d
 trusted-proxies:
   - "127.0.0.1/32"
   - "172.16.0.0/12"
+  - "172.17.0.0/16"
+  - "172.17.0.1/16"
   - "192.168.0.0/16"
   - "10.0.0.0/8"
   - "::1"
@@ -702,13 +712,59 @@ func (m *GoToSocialManager) HandlePhanpySSO(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+
+	m.mu.RLock()
+	sigServer := m.signalingServer
+	m.mu.RUnlock()
+
+	if sigServer != nil {
+		client := sigServer.GetClient(peerID)
+		if client == nil {
+			log.Printf("[GoToSocial SSO] 🚫 Acceso denegado: peerId '%s' no tiene conexión activa en el servidor de señalización", peerID)
+			http.Error(w, "Acceso denegado: peer no conectado al servidor de señalización", http.StatusForbidden)
+			return
+		}
+
+		if token == "" || client.Token != token {
+			log.Printf("[GoToSocial SSO] 🚫 Acceso denegado: token ausente o no coincide con la conexión activa para peerId '%s'", peerID)
+			http.Error(w, "Acceso denegado: token de PeerJS inválido", http.StatusForbidden)
+			return
+		}
+	}
+
 	username := sanitizePeerUsername(peerID)
 	publicHost := m.cfg.GetPublicIP()
+	if net.ParseIP(publicHost) != nil || publicHost == "" {
+		if reqHost := r.Host; reqHost != "" && !strings.HasPrefix(reqHost, "127.") && !strings.HasPrefix(reqHost, "localhost") {
+			publicHost = strings.Split(reqHost, ":")[0]
+		} else if dom := os.Getenv("DOMAIN"); dom != "" {
+			publicHost = dom
+		} else if appID := os.Getenv("DDNS_APPLIANCE_ID"); appID != "" {
+			publicHost = fmt.Sprintf("%s.appliances.klitosan.com", appID)
+		}
+	}
 	password := fmt.Sprintf("P1ng0_%s#2026!", username)
 	email := fmt.Sprintf("%s@%s", username, publicHost)
 
-	// Register/ensure Phanpy OAuth client for redirection
-	phanpyRedirectURI := "https://phanpy.social/"
+	// Ensure GoToSocial user account exists and is confirmed before attempting sign_in
+	gtsBin := "/usr/bin/gotosocial"
+	gtsCfg := "/etc/gotosocial/config.yaml"
+	if _, err := os.Stat(gtsBin); err == nil && os.Getenv("ENABLE_MASTODON") != "" {
+		createCmd := exec.CommandContext(r.Context(), gtsBin, "--config-path", gtsCfg, "admin", "account", "create", "--username", username, "--email", email, "--password", password)
+		_ = createCmd.Run()
+		confirmCmd := exec.CommandContext(r.Context(), gtsBin, "--config-path", gtsCfg, "admin", "account", "confirm", "--username", username)
+		_ = confirmCmd.Run()
+	}
+
+	// Determine scheme and base origin for first-party redirect
+	scheme := "https"
+	if r.TLS == nil && !m.cfg.EnableTLS && (strings.HasPrefix(publicHost, "192.168.") || strings.HasPrefix(publicHost, "127.") || strings.HasPrefix(publicHost, "10.") || strings.HasPrefix(publicHost, "localhost")) {
+		scheme = "http"
+	}
+	applianceOrigin := fmt.Sprintf("%s://%s", scheme, publicHost)
+	phanpyRedirectURI := fmt.Sprintf("%s/phanpy/", applianceOrigin)
+
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -739,8 +795,8 @@ func (m *GoToSocialManager) HandlePhanpySSO(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	if clientID == "" {
-		// Fallback to direct phanpy without code if error
-		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		// Fallback to direct local /phanpy/ without code if error
+		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
 		return
 	}
 
@@ -749,13 +805,13 @@ func (m *GoToSocialManager) HandlePhanpySSO(w http.ResponseWriter, r *http.Reque
 		target, url.QueryEscape(clientID), url.QueryEscape(phanpyRedirectURI))
 	req1, err := http.NewRequestWithContext(r.Context(), "GET", authURL, nil)
 	if err != nil {
-		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
 		return
 	}
 	req1.Host = publicHost
 	resp1, err := client.Do(req1)
 	if err != nil {
-		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
 		return
 	}
 	resp1.Body.Close()
@@ -785,52 +841,24 @@ func (m *GoToSocialManager) HandlePhanpySSO(w http.ResponseWriter, r *http.Reque
 	}
 	resp2, err := client.Do(req2)
 	if err != nil {
-		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
 		return
 	}
 	resp2.Body.Close()
-
-	var authCookie string
+	// Forward only the GoToSocial authenticated session cookies from resp2 to the client's browser
 	for _, c := range resp2.Cookies() {
 		if strings.HasPrefix(c.Name, "gotosocial-") {
-			authCookie = c.String()
-			break
+			// Ensure cookie is valid for browser navigation across GoToSocial and Phanpy OAuth callback
+			c.SameSite = http.SameSiteLaxMode
+			c.Secure = scheme == "https"
+			c.Path = "/"
+			http.SetCookie(w, c)
 		}
 	}
-	if authCookie == "" {
-		authCookie = sessionCookie
-	}
 
-	// 4. Step C: POST /oauth/authorize for authorization code
-	authApproveURL := fmt.Sprintf("%s/oauth/authorize", target)
-	authForm := url.Values{}
-	authForm.Set("client_id", clientID)
-	authForm.Set("redirect_uri", phanpyRedirectURI)
-	authForm.Set("response_type", "code")
-	authForm.Set("scope", "read write follow push")
-
-	req3, _ := http.NewRequestWithContext(r.Context(), "POST", authApproveURL, strings.NewReader(authForm.Encode()))
-	req3.Host = publicHost
-	req3.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if authCookie != "" {
-		req3.Header.Set("Cookie", authCookie)
-	}
-	resp3, err := client.Do(req3)
-	if err != nil {
-		http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
-		return
-	}
-	resp3.Body.Close()
-
-	loc := resp3.Header.Get("Location")
-	if strings.Contains(loc, "code=") {
-		// Successful auto-authorization: redirect to Phanpy with code!
-		log.Printf("[GoToSocial] 🚀 Zero-click SSO emitido para @%s hacia Phanpy", username)
-		http.Redirect(w, r, loc, http.StatusFound)
-		return
-	}
-
-	// Fallback to standard Phanpy instance url
-	http.Redirect(w, r, fmt.Sprintf("https://phanpy.social/#%s", publicHost), http.StatusFound)
+	log.Printf("[GoToSocial] 🚀 Sesión pre-autenticada emitida para @%s, redirigiendo a Phanpy local", username)
+	// Redirect to first-party Phanpy login route with instance preselected and submit=1 for automated authorization
+	phanpyLoginURL := fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost))
+	http.Redirect(w, r, phanpyLoginURL, http.StatusFound)
 }
 
