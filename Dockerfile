@@ -32,8 +32,8 @@ RUN apk add --no-cache git
 RUN git clone --depth 1 https://github.com/cheeaun/phanpy.git .
 RUN npm ci || npm install
 ENV PHANPY_CLIENT_NAME="Pingo Fediverse (Phanpy)"
-COPY patch-phanpy.js ./
-RUN node patch-phanpy.js
+COPY patch-phanpy.cjs ./
+RUN node patch-phanpy.cjs
 RUN npm run build
 
 # ------------------------------------------------------------------------------
