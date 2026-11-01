@@ -32,12 +32,8 @@ RUN apk add --no-cache git
 RUN git clone --depth 1 https://github.com/cheeaun/phanpy.git .
 RUN npm ci || npm install
 ENV PHANPY_CLIENT_NAME="Pingo Fediverse (Phanpy)"
-# Apply Pingo SSO Token Bootstrap patch into src/app.jsx
-RUN node -e '\
-const fs = require("fs");\
-let s = fs.readFileSync("src/app.jsx", "utf8");\
-const target = `    const instanceURL = store.local.get(\x27instanceURL\x27);\n    const code = decodeURIComponent(\n      (window.location.search.match(/code=([^&]+)/) || [, \x27\x27])[1],\n    );`;\
-const replacement = `    let instanceURL = store.local.get(\x27instanceURL\x27) || window.location.host;\n    const urlParams = new URLSearchParams(window.location.search);\n    const code = decodeURIComponent(\n      (window.location.search.match(/code=([^&]+)/) || [, \x27\x27])[1],\n    );\n    const ssoToken = urlParams.get(\x27token\x27) || (window.location.hash.match(/[?&]token=([^&]+)/) || [])[1];\n    if (ssoToken) {\n      const ssoInstance = urlParams.get(\x27instance\x27) || (window.location.hash.match(/[?&]instance=([^&]+)/) || [])[1] || instanceURL;\n      store.local.set(\x27instanceURL\x27, ssoInstance);\n      window.history.replaceState({}, document.title, window.location.pathname || \x27/\x27);\n      (async () => {\n        setUIState(\x27loading\x27);\n        try {\n          const client = initClient({ instance: ssoInstance, accessToken: ssoToken });\n          await Promise.allSettled([\n            initPreferences(client),\n            initInstance(client, ssoInstance),\n            initAccount(client, ssoInstance, ssoToken, undefined),\n          ]);\n          initStates();\n          window.__IGNORE_GET_ACCOUNT_ERROR__ = true;\n          setIsLoggedIn(true);\n          setUIState(\x27default\x27);\n          window.location.hash = \x27/\x27;\n        } catch (e) {\n          console.error(\x27SSO bootstrap error:\x27, e);\n          setUIState(\x27error\x27);\n        }\n      })();\n      return;\n    }`;\ns = s.replace(target, replacement);\nfs.writeFileSync("src/app.jsx", s, "utf8");'
+COPY patch-phanpy.js ./
+RUN node patch-phanpy.js
 RUN npm run build
 
 # ------------------------------------------------------------------------------
