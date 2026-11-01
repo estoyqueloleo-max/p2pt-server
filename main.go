@@ -122,15 +122,17 @@ func (c *Client) SendJSON(v interface{}) error {
 
 // SignalingServer manages PeerJS WebSocket and HTTP connections
 type SignalingServer struct {
-	clients  map[string]*Client
-	mu       sync.RWMutex
-	upgrader websocket.Upgrader
-	cfg      *Config
+	clients      map[string]*Client
+	recentTokens map[string]map[string]time.Time // peerId -> token -> lastSeen
+	mu           sync.RWMutex
+	upgrader     websocket.Upgrader
+	cfg          *Config
 }
 
 func NewSignalingServer(cfg *Config) *SignalingServer {
 	return &SignalingServer{
-		clients: make(map[string]*Client),
+		clients:      make(map[string]*Client),
+		recentTokens: make(map[string]map[string]time.Time),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins for P2P web clients
@@ -162,6 +164,22 @@ func (s *SignalingServer) AddClient(id, token string, conn *websocket.Conn) *Cli
 		LastSeen: time.Now(),
 	}
 	s.clients[id] = client
+
+	// Registrar token reciente para mitigar carreras en reconexiones WebSocket móviles
+	if token != "" {
+		if s.recentTokens[id] == nil {
+			s.recentTokens[id] = make(map[string]time.Time)
+		}
+		s.recentTokens[id][token] = time.Now()
+		// Limpiar tokens con más de 10 minutos
+		cutoff := time.Now().Add(-10 * time.Minute)
+		for t, seen := range s.recentTokens[id] {
+			if seen.Before(cutoff) {
+				delete(s.recentTokens[id], t)
+			}
+		}
+	}
+
 	log.Printf("[PeerJS] Registered client ID: %s (total clients: %d)", id, len(s.clients))
 	return client
 }
@@ -185,6 +203,33 @@ func (s *SignalingServer) GetClient(id string) *Client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.clients[id]
+}
+
+// ValidatePeerToken verifica si un token es válido actualmente o ha sido visto recientemente (ventana de gracia)
+func (s *SignalingServer) ValidatePeerToken(id, token string) bool {
+	if id == "" || token == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// 1. Cliente activo actualmente
+	if client, exists := s.clients[id]; exists && client != nil {
+		if client.Token == token {
+			return true
+		}
+	}
+
+	// 2. Token visto recientemente (dentro de los últimos 5 minutos) para tolerar reconexiones
+	if tokenMap, exists := s.recentTokens[id]; exists {
+		if seen, ok := tokenMap[token]; ok {
+			if time.Since(seen) < 5*time.Minute {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func (s *SignalingServer) ClientCount() int {

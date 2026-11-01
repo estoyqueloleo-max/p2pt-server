@@ -719,16 +719,9 @@ func (m *GoToSocialManager) HandlePhanpySSO(w http.ResponseWriter, r *http.Reque
 	m.mu.RUnlock()
 
 	if sigServer != nil {
-		client := sigServer.GetClient(peerID)
-		if client == nil {
-			log.Printf("[GoToSocial SSO] 🚫 Acceso denegado: peerId '%s' no tiene conexión activa en el servidor de señalización", peerID)
-			http.Error(w, "Acceso denegado: peer no conectado al servidor de señalización", http.StatusForbidden)
-			return
-		}
-
-		if token == "" || client.Token != token {
-			log.Printf("[GoToSocial SSO] 🚫 Acceso denegado: token ausente o no coincide con la conexión activa para peerId '%s'", peerID)
-			http.Error(w, "Acceso denegado: token de PeerJS inválido", http.StatusForbidden)
+		if !sigServer.ValidatePeerToken(peerID, token) {
+			log.Printf("[GoToSocial SSO] 🚫 Acceso denegado: token ausente o inválido para peerId '%s' (token recibido len=%d)", peerID, len(token))
+			http.Error(w, "Acceso denegado: token de PeerJS inválido o caducado", http.StatusForbidden)
 			return
 		}
 	}
