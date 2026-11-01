@@ -750,108 +750,17 @@ func (m *GoToSocialManager) HandlePhanpySSO(w http.ResponseWriter, r *http.Reque
 		_ = confirmCmd.Run()
 	}
 
-	// Determine scheme and base origin for first-party redirect
-	scheme := "https"
-	if r.TLS == nil && !m.cfg.EnableTLS && (strings.HasPrefix(publicHost, "192.168.") || strings.HasPrefix(publicHost, "127.") || strings.HasPrefix(publicHost, "10.") || strings.HasPrefix(publicHost, "localhost")) {
-		scheme = "http"
-	}
-	applianceOrigin := fmt.Sprintf("%s://%s", scheme, publicHost)
-	phanpyRedirectURI := fmt.Sprintf("%s/phanpy/", applianceOrigin)
-
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	target := m.targetURL.String()
-
-	// 1. Create/find application for Phanpy
-	appURL := fmt.Sprintf("%s/api/v1/apps", target)
-	appForm := url.Values{}
-	appForm.Set("client_name", "Phanpy")
-	appForm.Set("redirect_uris", phanpyRedirectURI)
-	appForm.Set("scopes", "read write follow push")
-
-	var clientID string
-	appReq, err := http.NewRequestWithContext(r.Context(), "POST", appURL, strings.NewReader(appForm.Encode()))
-	if err == nil {
-		appReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		appResp, err := client.Do(appReq)
-		if err == nil {
-			var appData struct {
-				ClientID string `json:"client_id"`
-			}
-			_ = json.NewDecoder(appResp.Body).Decode(&appData)
-			appResp.Body.Close()
-			clientID = appData.ClientID
-		}
-	}
-	if clientID == "" {
-		// Fallback to direct local /phanpy/ without code if error
-		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
-		return
-	}
-
-	// 2. Perform step A: GET /oauth/authorize for cookie
-	authURL := fmt.Sprintf("%s/oauth/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=read+write+follow+push",
-		target, url.QueryEscape(clientID), url.QueryEscape(phanpyRedirectURI))
-	req1, err := http.NewRequestWithContext(r.Context(), "GET", authURL, nil)
+	// Direct zero-friction token generation: get user's bearer token directly via GoToSocial backend
+	token, user, err := m.ensureUserToken(r.Context(), username, publicHost)
 	if err != nil {
+		log.Printf("[GoToSocial SSO] ⚠️ Error obteniendo token para @%s: %v, recurriendo a login tradicional", username, err)
 		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
 		return
 	}
-	req1.Host = publicHost
-	resp1, err := client.Do(req1)
-	if err != nil {
-		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
-		return
-	}
-	resp1.Body.Close()
 
-	var sessionCookie string
-	for _, c := range resp1.Cookies() {
-		if strings.HasPrefix(c.Name, "gotosocial-") {
-			sessionCookie = c.String()
-			break
-		}
-	}
-	if sessionCookie == "" && resp1.Header.Get("Set-Cookie") != "" {
-		sessionCookie = resp1.Header.Get("Set-Cookie")
-	}
-
-	// 3. Step B: POST /auth/sign_in
-	signInURL := fmt.Sprintf("%s/auth/sign_in", target)
-	signInForm := url.Values{}
-	signInForm.Set("username", email)
-	signInForm.Set("password", password)
-
-	req2, _ := http.NewRequestWithContext(r.Context(), "POST", signInURL, strings.NewReader(signInForm.Encode()))
-	req2.Host = publicHost
-	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if sessionCookie != "" {
-		req2.Header.Set("Cookie", sessionCookie)
-	}
-	resp2, err := client.Do(req2)
-	if err != nil {
-		http.Redirect(w, r, fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost)), http.StatusFound)
-		return
-	}
-	resp2.Body.Close()
-	// Forward only the GoToSocial authenticated session cookies from resp2 to the client's browser
-	for _, c := range resp2.Cookies() {
-		if strings.HasPrefix(c.Name, "gotosocial-") {
-			// Ensure cookie is valid for browser navigation across GoToSocial and Phanpy OAuth callback
-			c.SameSite = http.SameSiteLaxMode
-			c.Secure = scheme == "https"
-			c.Path = "/"
-			http.SetCookie(w, c)
-		}
-	}
-
-	log.Printf("[GoToSocial] 🚀 Sesión pre-autenticada emitida para @%s, redirigiendo a Phanpy local", username)
-	// Redirect to first-party Phanpy login route with instance preselected and submit=1 for automated authorization
-	phanpyLoginURL := fmt.Sprintf("/phanpy/#/login?instance=%s&submit=1", url.QueryEscape(publicHost))
-	http.Redirect(w, r, phanpyLoginURL, http.StatusFound)
+	log.Printf("[GoToSocial SSO] 🚀 Token de acceso emitido para @%s, redirigiendo a Phanpy con sesión activa", user)
+	// Redirect to Phanpy with token and instance query parameters for instant bootstrap
+	targetURL := fmt.Sprintf("/phanpy/?token=%s&instance=%s", url.QueryEscape(token), url.QueryEscape(publicHost))
+	http.Redirect(w, r, targetURL, http.StatusFound)
 }
 

@@ -77,7 +77,7 @@ CFG_EOF
                 http://127.0.0.1:8080/api/v1/apps >/dev/null 2>&1 || true
 
             curl -s -X POST -H "Content-Type: application/json" \
-                -d "{\"client_name\": \"Phanpy\", \"redirect_uris\": \"https://${PUBLIC_HOST}/phanpy/\", \"scopes\": \"read write follow push\"}" \
+                -d "{\"client_name\": \"Pingo Fediverse (Phanpy)\", \"redirect_uris\": \"https://${PUBLIC_HOST}/phanpy/\", \"website\": \"https://${PUBLIC_HOST}/phanpy/\", \"scopes\": \"read write follow push\"}" \
                 http://127.0.0.1:8080/api/v1/apps >/dev/null 2>&1 || true
         ) &
     else
