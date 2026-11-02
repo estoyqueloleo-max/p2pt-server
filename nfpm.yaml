@@ -18,7 +18,7 @@ contents:
     dst: /etc/init.d/p2pt
     file_info:
       mode: 0755
-  - src: ../p2pt/dist/
+  - src: ./web-dist/
     dst: /var/lib/p2pt/web/
     file_info:
       mode: 0644
