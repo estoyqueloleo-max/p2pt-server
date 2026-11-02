@@ -1,26 +1,35 @@
-# 🌐 Pingo Standalone Server (PeerJS + Pion TURN/STUN)
+# 🌐 P2PT Appliance & Standalone Server (PeerJS + TURN + Git + Fediverse)
 
-Servidor ejecutable independiente "Todo en Uno" desarrollado en Go para autoalojamiento doméstico o en VPS de la infraestructura de **Pingo**.
+Servidor ejecutable independiente "Todo en Uno" desarrollado en Go para autoalojamiento doméstico soberano (Appliance / Raspberry Pi / Docker) o en VPS de la infraestructura de **Pingo / EstoyQueLoLeo**.
 
-Elimina la necesidad de instalar Docker, Node.js o configurar Coturn por separado: en un único binario ligero (~15 MB) incluye el **Servidor de Señalización PeerJS** (WebSockets), el **Servidor de Relé STUN/TURN** (`pion/turn`), **Auto-configuración UPnP para routers**, **Sincronización automática con DuckDNS** y un **Asistente Web/CLI interactivo**.
+Integra en un único ecosistema ligero todo lo necesario para la experiencia descentralizada sin depender de servicios de terceros:
+- **Señalización WebSockets (PeerJS)** para emparejamiento directo.
+- **Relé STUN/TURN (`pion/turn` con Ring Relay)** para atravesar redes móviles 4G/5G y CGNAT en puertos UDP dedicados (7000–7050).
+- **Servidor Git Smart HTTP nativo** (`git_server.go`) con autenticación mediante tokens efímeros para sincronizar historiales, rutas y datos.
+- **Identidad Federada & Fediverso (GoToSocial)** con cliente web **Phanpy** embebido (`/phanpy`) y flujo de **SSO directo (zero-click)** mediante credenciales WebRTC.
+- **Servidor de Notificaciones WebPush descentralizado** (`push_manager.go`) con claves VAPID locales.
+- **Auto-Apertura UPnP para routers**, **DDNS con DuckDNS / Cloud Hub** y **Certificados SSL automáticos (ACME / Let's Encrypt)**.
 
 ---
 
 ## ✨ Características
 
-- ⚡ **Binario Único sin Dependencias**: Compilado en Go estático (~8 MB).
+- ⚡ **Binario Único sin Dependencias Externas**: Compilado en Go estático (~15 MB).
 - 📡 **Señalización PeerJS Integrada**: Conexiones WebSocket nativas para intercambio de SDP/ICE y presencia.
-- 🔄 **Relé TURN/STUN Integrado**: Servidor UDP de alto rendimiento con `pion/turn` para atravesar NATs simétricos y redes móviles (4G/5G).
+- 🔄 **Relé TURN/STUN Integrado**: Servidor UDP de alto rendimiento con `pion/turn` y gestión de puertos de retransmisión dedicados (`Ring Relay`) para atravesar NATs simétricos y redes móviles (4G/5G).
+- 📦 **Smart HTTP Git Server (`/git/:user/:repo.git`)**: Almacenamiento y sincronización de repositorios Git sobre HTTP/HTTPS compatible con `isomorphic-git`, `git clone` y `git push`.
+- 🐘 **Fediverso / Mastodon Embebido (GoToSocial)**: Proxy inverso integrado, auto-aprovisionamiento de cuentas y cliente web **Phanpy** servido en `/phanpy` con login transparente.
+- 🔔 **Notificaciones Push Soberanas (`/push/`)**: Gestión de suscripciones WebPush (VAPID) en backend local sin intermediarios comerciales.
 - 📶 **Auto-Descubrimiento Local mDNS**: Anuncio `_pingo._tcp` y resolución automática como `http://pingo.local:9000/`.
-- 🔄 **Auto-Actualización en Segundo Plano**: Chequeo periódico de releases en GitHub y reemplazo atómico de binario.
-- 🔌 **Auto-Apertura UPnP & Diagnóstico CGNAT**: Detecta tu router automáticamente, abre los puertos UDP/TCP sin tocar el panel del router y te avisa si tu operadora tiene CGNAT activo.
-- 🦆 **Integración con DuckDNS (`duckdns.org`)**: Sincronización automática de tu IP pública dinámica con tu subdominio gratuito cada 10 minutos.
-- 🧙 **Asistente Interactivo (CLI & Web)**: Asistente paso a paso en terminal (`-wizard`) o directamente desde el panel web de control.
-- 📲 **Auto-Vinculación por QR / URL**: Muestra en la consola de terminal y en la web un código QR interactivo y enlace directo para vincular la app Pingo en 1 clic.
-- ⚙️ **Multiplataforma & Appliance Raspberry Pi Zero**: Binarios y paquetes APK de Alpine listos para Linux (x86_64, ARM64 y ARMv6 / Pi Zero), Windows y macOS.
-- 🔒 **Soporte TLS / WSS**: Compatible con certificados SSL directos o detrás de proxys inversos.
+- 🔄 **Auto-Actualización en Segundo Plano**: Chequeo periódico de releases en GitHub y reemplazo atómico del binario.
+- 🔌 **Auto-Apertura UPnP & Diagnóstico CGNAT**: Detecta tu router automáticamente, abre los puertos UDP/TCP y avisa si la operadora tiene CGNAT activo.
+- 🦆 **Integración con DuckDNS y Cloud Hub**: Sincronización automática de IP pública dinámica y certificados SSL Let's Encrypt sin abrir puertos HTTP inseguros.
+- 🧙 **Asistente Interactivo (CLI & Web)**: Configuración paso a paso en terminal (`-wizard`) o directamente desde el panel web de control.
+- 📲 **Auto-Vinculación por QR / URL**: Muestra en consola y en la web un código QR interactivo para vincular la app móvil en 1 clic.
+- ⚙️ **Multiplataforma & Modo Appliance**: Binarios y paquetes APK de Alpine listos para Linux (x86_64, ARM64 y ARMv6 / Pi Zero), imágenes Docker multi-arch y soporte para arranque diskless en RAM con `appliance-builder`.
+- 🔒 **Soporte TLS / WSS**: Compatible con certificados SSL directos o detrás de proxys inversos (Nginx / Apache / Traefik / Cloud Hub).
 
-> 📖 Para ver el manual completo de pruebas automatizadas, emulación QEMU y auto-descubrimiento por DHT, consulta la [Guía de Pruebas y Appliance](../docs/TURN_TESTING_AND_APPLIANCE.md).
+> 📖 Para ver el manual completo de pruebas automatizadas, emulación QEMU y auto-descubrimiento por DHT, consulta la [Guía de Pruebas y Appliance](../p2pt/docs/TURN_TESTING_AND_APPLIANCE.md).
 
 ---
 
