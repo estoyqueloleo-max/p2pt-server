@@ -1,7 +1,7 @@
 name: "p2pt-server"
 arch: "${ARCH}"
 platform: "linux"
-version: "1.5.5"
+version: "${VERSION}"
 section: "net"
 priority: "optional"
 maintainer: "Jose Juan Montiel"
@@ -18,8 +18,7 @@ contents:
     dst: /etc/init.d/p2pt
     file_info:
       mode: 0755
-  - src: ../dist/
+  - src: ../p2pt/dist/
     dst: /var/lib/p2pt/web/
     file_info:
       mode: 0644
-      dir_mode: 0755

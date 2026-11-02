@@ -34,6 +34,10 @@ func (gs *GitServer) HandleGitCredentials(w http.ResponseWriter, r *http.Request
 	http.Error(w, `{"error":"Embedded Git server is not supported on Windows"}`, http.StatusNotImplemented)
 }
 
+func (gs *GitServer) HandleDeleteRepo(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, `{"error":"Embedded Git server is not supported on Windows"}`, http.StatusNotImplemented)
+}
+
 func (gs *GitServer) HandleRevokePeer(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, `{"error":"Embedded Git server is not supported on Windows"}`, http.StatusNotImplemented)
 }
